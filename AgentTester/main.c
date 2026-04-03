@@ -472,6 +472,47 @@ static void cmd_screen_hash(void)
     printf("\n");
 }
 
+static void cmd_set(const char *args)
+{
+    if (!args || !*args) {
+        printf("ERR missing setting name\n");
+        return;
+    }
+
+    char setting[32] = {0};
+    char value[64] = {0};
+    sscanf(args, "%31s %63s", setting, value);
+
+    if (strcmp(setting, "turbo") == 0) {
+        if (!gb_inited) { printf("ERR no ROM loaded\n"); return; }
+        if (strcasecmp(value, "on") == 0) {
+            GB_set_turbo_mode(&gb, true, true);
+        } else if (strcasecmp(value, "off") == 0) {
+            GB_set_turbo_mode(&gb, false, false);
+        } else {
+            printf("ERR turbo value must be 'on' or 'off'\n");
+            return;
+        }
+        printf("OK\n");
+    } else if (strcmp(setting, "model") == 0) {
+        current_model = parse_model(value);
+        printf("OK\n");
+    } else if (strcmp(setting, "rendering") == 0) {
+        if (!gb_inited) { printf("ERR no ROM loaded\n"); return; }
+        if (strcasecmp(value, "on") == 0) {
+            GB_set_rendering_disabled(&gb, false);
+        } else if (strcasecmp(value, "off") == 0) {
+            GB_set_rendering_disabled(&gb, true);
+        } else {
+            printf("ERR rendering value must be 'on' or 'off'\n");
+            return;
+        }
+        printf("OK\n");
+    } else {
+        printf("ERR unknown setting: %s\n", setting);
+    }
+}
+
 /* Main REPL loop */
 static void repl(void)
 {
@@ -514,6 +555,8 @@ static void repl(void)
             cmd_release(args);
         } else if (strcmp(cmd, "set_keys") == 0) {
             cmd_set_keys(args);
+        } else if (strcmp(cmd, "set") == 0) {
+            cmd_set(args);
         } else if (strcmp(cmd, "save_state") == 0) {
             cmd_save_state(args);
         } else if (strcmp(cmd, "load_state") == 0) {
