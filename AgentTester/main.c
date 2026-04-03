@@ -325,6 +325,102 @@ static void cmd_set_keys(const char *args)
     printf("OK\n");
 }
 
+static void cmd_save_state(const char *args)
+{
+    if (!gb_inited) { printf("ERR no ROM loaded\n"); return; }
+    while (args && *args == ' ') args++;
+    if (!args || !*args) { printf("ERR missing file path\n"); return; }
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s", args);
+    size_t len = strlen(path);
+    while (len > 0 && (path[len-1] == ' ' || path[len-1] == '\n' || path[len-1] == '\r'))
+        path[--len] = '\0';
+
+    if (GB_save_state(&gb, path) == 0) {
+        printf("OK\n");
+    } else {
+        printf("ERR failed to save state to %s\n", path);
+    }
+}
+
+static void cmd_load_state(const char *args)
+{
+    if (!gb_inited) { printf("ERR no ROM loaded\n"); return; }
+    while (args && *args == ' ') args++;
+    if (!args || !*args) { printf("ERR missing file path\n"); return; }
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s", args);
+    size_t len = strlen(path);
+    while (len > 0 && (path[len-1] == ' ' || path[len-1] == '\n' || path[len-1] == '\r'))
+        path[--len] = '\0';
+
+    if (GB_load_state(&gb, path) == 0) {
+        printf("OK\n");
+    } else {
+        printf("ERR failed to load state from %s\n", path);
+    }
+}
+
+static void cmd_read_memory(const char *args)
+{
+    if (!gb_inited) { printf("ERR no ROM loaded\n"); return; }
+    if (!args || !*args) { printf("ERR missing address\n"); return; }
+
+    unsigned int addr = 0;
+    unsigned int len = 1;
+    sscanf(args, "%x %u", &addr, &len);
+    if (len == 0) len = 1;
+    if (len > 256) len = 256;
+
+    printf("OK");
+    for (unsigned int i = 0; i < len; i++) {
+        printf(" %02X", GB_read_memory(&gb, (uint16_t)(addr + i)));
+    }
+    printf("\n");
+}
+
+static void cmd_write_memory(const char *args)
+{
+    if (!gb_inited) { printf("ERR no ROM loaded\n"); return; }
+    if (!args || !*args) { printf("ERR missing address and data\n"); return; }
+
+    unsigned int addr = 0;
+    char *endptr = NULL;
+    addr = (unsigned int)strtoul(args, &endptr, 16);
+
+    while (endptr && *endptr == ' ') endptr++;
+    if (!endptr || !*endptr) { printf("ERR missing data bytes\n"); return; }
+
+    /* Parse hex bytes */
+    char *p = endptr;
+    while (*p) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        unsigned int byte;
+        if (sscanf(p, "%2x", &byte) != 1) break;
+        GB_write_memory(&gb, (uint16_t)addr, (uint8_t)byte);
+        addr++;
+        p += 2;
+    }
+    printf("OK\n");
+}
+
+static void cmd_registers(void)
+{
+    if (!gb_inited) { printf("ERR no ROM loaded\n"); return; }
+
+    GB_registers_t *regs = GB_get_registers(&gb);
+    printf("OK AF=%04X BC=%04X DE=%04X HL=%04X SP=%04X PC=%04X\n",
+           regs->registers[GB_REGISTER_AF],
+           regs->registers[GB_REGISTER_BC],
+           regs->registers[GB_REGISTER_DE],
+           regs->registers[GB_REGISTER_HL],
+           regs->registers[GB_REGISTER_SP],
+           regs->registers[GB_REGISTER_PC]);
+}
+
 static void cmd_screenshot(const char *args)
 {
     if (!gb_inited) {
@@ -418,6 +514,16 @@ static void repl(void)
             cmd_release(args);
         } else if (strcmp(cmd, "set_keys") == 0) {
             cmd_set_keys(args);
+        } else if (strcmp(cmd, "save_state") == 0) {
+            cmd_save_state(args);
+        } else if (strcmp(cmd, "load_state") == 0) {
+            cmd_load_state(args);
+        } else if (strcmp(cmd, "read_memory") == 0) {
+            cmd_read_memory(args);
+        } else if (strcmp(cmd, "write_memory") == 0) {
+            cmd_write_memory(args);
+        } else if (strcmp(cmd, "registers") == 0) {
+            cmd_registers();
         } else if (strcmp(cmd, "screenshot") == 0) {
             cmd_screenshot(args ? args : "");
         } else if (strcmp(cmd, "screen_hash") == 0) {
