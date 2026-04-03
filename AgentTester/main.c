@@ -8,6 +8,21 @@
 #include <Core/gb.h>
 #include <Core/random.h>
 
+#include "save_screenshot.h"
+
+#ifdef __APPLE__
+#include <CommonCrypto/CommonDigest.h>
+#define SHA256_DIGEST_LENGTH CC_SHA256_DIGEST_LENGTH
+static void sha256(const void *data, size_t len, unsigned char *out) {
+    CC_SHA256(data, (CC_LONG)len, out);
+}
+#else
+#include <openssl/sha.h>
+static void sha256(const void *data, size_t len, unsigned char *out) {
+    SHA256(data, len, out);
+}
+#endif
+
 static GB_gameboy_t gb;
 static uint32_t pixel_buffer[256 * 224];
 static bool gb_inited = false;
@@ -225,6 +240,57 @@ static void cmd_run(const char *args)
     printf("OK frames=%u cycles=%llu\n", n, (unsigned long long)total_ns);
 }
 
+static void cmd_screenshot(const char *args)
+{
+    if (!gb_inited) {
+        printf("ERR no ROM loaded\n");
+        return;
+    }
+
+    while (*args == ' ') args++;
+    if (*args == '\0') {
+        printf("ERR missing file path\n");
+        return;
+    }
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s", args);
+    size_t len = strlen(path);
+    while (len > 0 && (path[len-1] == ' ' || path[len-1] == '\n' || path[len-1] == '\r')) {
+        path[--len] = '\0';
+    }
+
+    unsigned w = GB_get_screen_width(&gb);
+    unsigned h = GB_get_screen_height(&gb);
+
+    if (save_screenshot(path, w, h, pixel_buffer)) {
+        printf("OK %ux%u\n", w, h);
+    } else {
+        printf("ERR failed to save screenshot to %s\n", path);
+    }
+}
+
+static void cmd_screen_hash(void)
+{
+    if (!gb_inited) {
+        printf("ERR no ROM loaded\n");
+        return;
+    }
+
+    unsigned w = GB_get_screen_width(&gb);
+    unsigned h = GB_get_screen_height(&gb);
+    size_t data_size = w * h * sizeof(uint32_t);
+
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    sha256(pixel_buffer, data_size, hash);
+
+    printf("OK ");
+    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++) {
+        printf("%02x", hash[i]);
+    }
+    printf("\n");
+}
+
 /* Main REPL loop */
 static void repl(void)
 {
@@ -261,6 +327,10 @@ static void repl(void)
             cmd_reset();
         } else if (strcmp(cmd, "run") == 0) {
             cmd_run(args);
+        } else if (strcmp(cmd, "screenshot") == 0) {
+            cmd_screenshot(args ? args : "");
+        } else if (strcmp(cmd, "screen_hash") == 0) {
+            cmd_screen_hash();
         } else {
             printf("ERR unknown command: %s\n", cmd);
         }

@@ -435,7 +435,18 @@ CORE_SOURCES := $(filter-out $(CORE_FILTER),$(shell ls Core/*.c))
 CORE_HEADERS := $(shell ls Core/*.h)
 SDL_SOURCES := $(shell ls SDL/*.c) $(OPEN_DIALOG) $(SAVE_PNG) $(patsubst %,SDL/audio/%.c,$(SDL_AUDIO_DRIVERS))
 TESTER_SOURCES := $(shell ls Tester/*.c)
-AGENT_TESTER_SOURCES := $(shell ls AgentTester/*.c)
+AGENT_TESTER_SOURCES := $(filter-out AgentTester/save_screenshot_libpng.c,$(shell ls AgentTester/*.c))
+ifeq ($(PLATFORM),Darwin)
+AGENT_TESTER_SOURCES += AgentTester/save_screenshot_appkit.m
+AGENT_TESTER_LDFLAGS := -framework AppKit
+else
+ifeq ($(PLATFORM),windows32)
+AGENT_TESTER_LDFLAGS :=
+else
+AGENT_TESTER_SOURCES += AgentTester/save_screenshot_libpng.c
+AGENT_TESTER_LDFLAGS := -lpng
+endif
+endif
 IOS_SOURCES := $(filter-out iOS/installer.m, $(shell ls iOS/*.m)) $(shell ls AppleCommon/*.m)
 COCOA_SOURCES := $(shell ls Cocoa/*.m) $(shell ls HexFiend/*.m) $(shell ls JoyKit/*.m) $(shell ls AppleCommon/*.m)
 QUICKLOOK_SOURCES := $(shell ls QuickLook/*.m) $(shell ls QuickLook/*.c)
@@ -748,7 +759,7 @@ $(BIN)/tester/%.bin: $(BOOTROMS_DIR)/%.bin
 
 $(BIN)/agent-tester/sameboy_agent_tester: $(CORE_OBJECTS) $(AGENT_TESTER_OBJECTS)
 	-@$(MKDIR) -p $(dir $@)
-	$(CC) $^ -o $@ $(LDFLAGS)
+	$(CC) $^ -o $@ $(LDFLAGS) $(AGENT_TESTER_LDFLAGS)
 ifeq ($(CONF), release)
 	$(STRIP) $@
 	$(CODESIGN) $@
@@ -756,7 +767,7 @@ endif
 
 $(BIN)/agent-tester/sameboy_agent_tester.exe: $(CORE_OBJECTS) $(AGENT_TESTER_OBJECTS)
 	-@$(MKDIR) -p $(dir $@)
-	$(CC) $^ -o $@ $(LDFLAGS) -Wl,/subsystem:console
+	$(CC) $^ -o $@ $(LDFLAGS) $(AGENT_TESTER_LDFLAGS) -Wl,/subsystem:console
 
 $(BIN)/agent-tester/%.bin: $(BOOTROMS_DIR)/%.bin
 	-@$(MKDIR) -p $(dir $@)
