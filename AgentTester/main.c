@@ -240,6 +240,91 @@ static void cmd_run(const char *args)
     printf("OK frames=%u cycles=%llu\n", n, (unsigned long long)total_ns);
 }
 
+static bool parse_button(const char *name, GB_key_t *key)
+{
+    if (strcasecmp(name, "A") == 0) { *key = GB_KEY_A; return true; }
+    if (strcasecmp(name, "B") == 0) { *key = GB_KEY_B; return true; }
+    if (strcasecmp(name, "START") == 0) { *key = GB_KEY_START; return true; }
+    if (strcasecmp(name, "SELECT") == 0) { *key = GB_KEY_SELECT; return true; }
+    if (strcasecmp(name, "UP") == 0) { *key = GB_KEY_UP; return true; }
+    if (strcasecmp(name, "DOWN") == 0) { *key = GB_KEY_DOWN; return true; }
+    if (strcasecmp(name, "LEFT") == 0) { *key = GB_KEY_LEFT; return true; }
+    if (strcasecmp(name, "RIGHT") == 0) { *key = GB_KEY_RIGHT; return true; }
+    return false;
+}
+
+static void cmd_press(const char *args)
+{
+    if (!gb_inited) {
+        printf("ERR no ROM loaded\n");
+        return;
+    }
+
+    char button_name[32] = {0};
+    unsigned int hold_frames = 1;
+
+    if (!args || !*args) {
+        printf("ERR missing button name\n");
+        return;
+    }
+
+    sscanf(args, "%31s %u", button_name, &hold_frames);
+    if (hold_frames == 0) hold_frames = 1;
+
+    GB_key_t key;
+    if (!parse_button(button_name, &key)) {
+        printf("ERR unknown button: %s\n", button_name);
+        return;
+    }
+
+    GB_set_key_state(&gb, key, true);
+    run_frames(hold_frames);
+    GB_set_key_state(&gb, key, false);
+    printf("OK\n");
+}
+
+static void cmd_release(const char *args)
+{
+    if (!gb_inited) {
+        printf("ERR no ROM loaded\n");
+        return;
+    }
+
+    if (!args || !*args) {
+        printf("ERR missing button name\n");
+        return;
+    }
+
+    char button_name[32] = {0};
+    sscanf(args, "%31s", button_name);
+
+    GB_key_t key;
+    if (!parse_button(button_name, &key)) {
+        printf("ERR unknown button: %s\n", button_name);
+        return;
+    }
+
+    GB_set_key_state(&gb, key, false);
+    printf("OK\n");
+}
+
+static void cmd_set_keys(const char *args)
+{
+    if (!gb_inited) {
+        printf("ERR no ROM loaded\n");
+        return;
+    }
+
+    if (!args || !*args) {
+        printf("ERR missing key mask\n");
+        return;
+    }
+
+    unsigned int mask = (unsigned int)strtoul(args, NULL, 0);
+    GB_set_key_mask(&gb, (GB_key_mask_t)mask);
+    printf("OK\n");
+}
+
 static void cmd_screenshot(const char *args)
 {
     if (!gb_inited) {
@@ -327,6 +412,12 @@ static void repl(void)
             cmd_reset();
         } else if (strcmp(cmd, "run") == 0) {
             cmd_run(args);
+        } else if (strcmp(cmd, "press") == 0) {
+            cmd_press(args);
+        } else if (strcmp(cmd, "release") == 0) {
+            cmd_release(args);
+        } else if (strcmp(cmd, "set_keys") == 0) {
+            cmd_set_keys(args);
         } else if (strcmp(cmd, "screenshot") == 0) {
             cmd_screenshot(args ? args : "");
         } else if (strcmp(cmd, "screen_hash") == 0) {
