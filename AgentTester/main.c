@@ -12,6 +12,7 @@ static GB_gameboy_t gb;
 static uint32_t pixel_buffer[256 * 224];
 static bool gb_inited = false;
 static const char *boot_rom_path = NULL;
+static char current_rom_path[1024] = {0};
 
 typedef enum {
     MODEL_CGB,
@@ -128,7 +129,6 @@ static bool init_and_load(const char *rom_path)
     const char *boot = boot_rom_for_model(current_model);
     if (GB_load_boot_rom(&gb, boot)) {
         fprintf(stderr, "Warning: failed to load boot ROM from '%s'\n", boot);
-        /* Continue without boot ROM — not fatal */
     }
 
     GB_set_vblank_callback(&gb, (GB_vblank_callback_t)vblank_callback);
@@ -142,12 +142,12 @@ static bool init_and_load(const char *rom_path)
     GB_set_turbo_mode(&gb, true, true);
 
     if (GB_load_rom(&gb, rom_path)) {
-        fprintf(stderr, "Failed to load ROM: %s\n", rom_path);
         GB_free(&gb);
         gb_inited = false;
         return false;
     }
 
+    snprintf(current_rom_path, sizeof(current_rom_path), "%s", rom_path);
     return true;
 }
 
@@ -159,6 +159,116 @@ static model_t parse_model(const char *str)
     return MODEL_CGB;
 }
 
+/* Run N frames, return total cycle count */
+static uint64_t run_frames(unsigned int n)
+{
+    uint64_t total_ns = 0;
+    for (unsigned int i = 0; i < n; i++) {
+        total_ns += GB_run_frame(&gb);
+    }
+    return total_ns;
+}
+
+/* REPL command handlers */
+
+static void cmd_load(const char *args)
+{
+    /* Skip leading whitespace */
+    while (*args == ' ') args++;
+    if (*args == '\0') {
+        printf("ERR missing rom path\n");
+        return;
+    }
+
+    /* Strip trailing whitespace/newline */
+    char path[1024];
+    snprintf(path, sizeof(path), "%s", args);
+    size_t len = strlen(path);
+    while (len > 0 && (path[len-1] == ' ' || path[len-1] == '\n' || path[len-1] == '\r')) {
+        path[--len] = '\0';
+    }
+
+    if (init_and_load(path)) {
+        printf("OK\n");
+    } else {
+        printf("ERR failed to load ROM: %s\n", path);
+    }
+}
+
+static void cmd_reset(void)
+{
+    if (!gb_inited || current_rom_path[0] == '\0') {
+        printf("ERR no ROM loaded\n");
+        return;
+    }
+    if (init_and_load(current_rom_path)) {
+        printf("OK\n");
+    } else {
+        printf("ERR failed to reset\n");
+    }
+}
+
+static void cmd_run(const char *args)
+{
+    if (!gb_inited) {
+        printf("ERR no ROM loaded\n");
+        return;
+    }
+
+    unsigned int n = 1;
+    if (args && *args) {
+        n = (unsigned int)strtoul(args, NULL, 10);
+        if (n == 0) n = 1;
+    }
+
+    uint64_t total_ns = run_frames(n);
+    printf("OK frames=%u cycles=%llu\n", n, (unsigned long long)total_ns);
+}
+
+/* Main REPL loop */
+static void repl(void)
+{
+    char line[4096];
+
+    while (fgets(line, sizeof(line), stdin)) {
+        /* Strip trailing newline */
+        size_t len = strlen(line);
+        while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) {
+            line[--len] = '\0';
+        }
+
+        /* Skip empty lines */
+        if (len == 0) continue;
+
+        /* Parse command and arguments */
+        char *cmd = line;
+        char *args = NULL;
+
+        /* Find first space to separate command from args */
+        char *space = strchr(line, ' ');
+        if (space) {
+            *space = '\0';
+            args = space + 1;
+            /* Skip leading whitespace in args */
+            while (*args == ' ') args++;
+        }
+
+        if (strcmp(cmd, "quit") == 0 || strcmp(cmd, "exit") == 0) {
+            break;
+        } else if (strcmp(cmd, "load") == 0) {
+            cmd_load(args ? args : "");
+        } else if (strcmp(cmd, "reset") == 0) {
+            cmd_reset();
+        } else if (strcmp(cmd, "run") == 0) {
+            cmd_run(args);
+        } else {
+            printf("ERR unknown command: %s\n", cmd);
+        }
+
+        fflush(stdout);
+    }
+}
+
 int main(int argc, char **argv)
 {
     fprintf(stderr, "SameBoy Agent Tester v" GB_VERSION "\n");
@@ -166,6 +276,9 @@ int main(int argc, char **argv)
     const char *rom_path = NULL;
 
     GB_random_set_enabled(false);
+
+    /* Force line buffering on stdout for agent communication */
+    setvbuf(stdout, NULL, _IOLBF, 0);
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-v") == 0) {
@@ -180,7 +293,7 @@ int main(int argc, char **argv)
             continue;
         }
         if (strcmp(argv[i], "--interactive") == 0) {
-            continue; /* Default mode, accepted but ignored for now */
+            continue; /* Default mode */
         }
         if (argv[i][0] != '-') {
             rom_path = argv[i];
@@ -191,24 +304,19 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    if (!rom_path) {
-        fprintf(stderr, "Usage: %s [--interactive] [--model <DMG|CGB|AGB|SGB>] [--boot <path>] <rom>\n", argv[0]);
-        return 1;
+    /* If ROM provided on command line, load it before entering REPL */
+    if (rom_path) {
+        if (!init_and_load(rom_path)) {
+            return 1;
+        }
+        fprintf(stderr, "ROM loaded: %s\n", rom_path);
     }
 
-    if (!init_and_load(rom_path)) {
-        return 1;
+    fprintf(stderr, "Entering interactive mode. Type 'quit' to exit.\n");
+    repl();
+
+    if (gb_inited) {
+        GB_free(&gb);
     }
-
-    fprintf(stderr, "ROM loaded: %s\n", rom_path);
-
-    /* Run 10 frames and report */
-    uint64_t total_ns = 0;
-    for (int i = 0; i < 10; i++) {
-        total_ns += GB_run_frame(&gb);
-    }
-    fprintf(stderr, "Ran 10 frames: %llu ns total\n", (unsigned long long)total_ns);
-
-    GB_free(&gb);
     return 0;
 }
