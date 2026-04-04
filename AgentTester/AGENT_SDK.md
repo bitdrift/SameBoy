@@ -34,7 +34,6 @@ Launch as a subprocess. Send commands to stdin, read responses from stdout (one 
 | Command | Response | Description |
 |---------|----------|-------------|
 | `run <N>` | `OK frames=<N> cycles=<total>` | Advance N frames. |
-| `run_until_vblank` | `OK cycles=<n>` | Run until the next VBlank. |
 
 #### Input
 
@@ -97,11 +96,15 @@ Launch as a subprocess. Send commands to stdin, read responses from stdout (one 
 | `set model <DMG\|CGB\|AGB\|SGB>` | `OK` | Set hardware model. Takes effect on next `load` or `reset`. |
 | `set rendering <on\|off>` | `OK` | Toggle rendering. Off = faster but no screenshots. |
 
+### Important: Boot ROM Timing
+
+After `load`, the Game Boy boot ROM animation runs for approximately 400 frames. You must `run 400` (or more) before any meaningful screen content appears. Commands like `screenshot` or `screen_hash` before this will capture the boot logo.
+
 ### Example: Verify a Title Screen
 
 ```
 load /path/to/game.gb
-run 300
+run 400
 screenshot /tmp/title.png
 screen_hash
 quit
@@ -111,7 +114,7 @@ quit
 
 ```
 load /path/to/game.gb
-run 300
+run 400
 press START 10
 run 60
 press A 10
@@ -127,7 +130,7 @@ quit
 
 ```
 load /path/to/game.gb
-run 600
+run 400
 read_memory C100 4
 registers
 quit
@@ -196,14 +199,11 @@ Exit code 0 = all tests passed, 1 = any test failed.
 ```json
 {
   "rom": "game.gb",
-  "model": "CGB",
-  "timestamp": "2026-04-03T12:00:00Z",
   "pass": false,
   "results": [
     {
       "name": "test_name",
       "pass": true,
-      "duration_ms": 42,
       "screenshots": ["output.png"],
       "assertions": [
         {"type": "screen_not_blank", "pass": true},
@@ -214,6 +214,13 @@ Exit code 0 = all tests passed, 1 = any test failed.
         "avg_cpu_usage": 0.62,
         "max_cpu_usage": 0.88,
         "min_cpu_usage": 0.40,
+        "cpu_usage_histogram": {
+          "0-50%": 200,
+          "50-75%": 300,
+          "75-90%": 80,
+          "90-95%": 15,
+          "95-100%": 5
+        },
         "slowdown_events": []
       }
     }
@@ -234,6 +241,58 @@ The Game Boy PPU renders at a fixed ~59.7 Hz. The CPU has 70,224 dots (cycles) p
 | 95–100% | **Slowdown likely.** Game loop is exceeding frame budget. Player will perceive slow motion. |
 
 **Slowdown events** are detected when CPU usage stays above 95% for multiple consecutive frames AND the screen content doesn't change — meaning the game's main loop is taking multiple VBlanks to produce a single visual update.
+
+## Common Patterns
+
+### Navigating Screens (press START multiple times)
+
+The test ROM has 4 screens cycled with START. To reach screen N from the title:
+
+```json
+{"actions": [
+  {"run": 400},
+  {"press": "start", "frames": 10},
+  {"run": 30},
+  {"press": "start", "frames": 10},
+  {"run": 30}
+]}
+```
+
+Each `press` + `run` combo ensures the button press is registered and the screen has time to render. The `frames: 10` hold duration prevents input being missed due to polling timing.
+
+### Profiling a Specific Section
+
+Wrap the section of interest between `perf_start` and `perf_stop`:
+
+```json
+{"actions": [
+  {"run": 400},
+  {"perf_start": true},
+  {"run": 120},
+  {"perf_stop": true},
+  {"assert_max_cpu_usage": 0.25},
+  {"assert_no_slowdown_events": true}
+]}
+```
+
+### Deterministic Regression Testing
+
+Capture a `screen_hash` once, then use it in future runs to detect visual regressions:
+
+```json
+{"actions": [
+  {"run": 400},
+  {"assert_screen_hash": "129faa007ddb4e0c6bc0c7acd5c88efffbfd7bf88a148031a805090b3377fce0"}
+]}
+```
+
+### Running All E2E Tests
+
+```bash
+make test-agent-tester
+```
+
+This builds the harness and runs all `AgentTester/test_rom/test_*.json` scripts.
 
 ## CLI Reference
 
