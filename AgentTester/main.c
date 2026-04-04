@@ -12,6 +12,7 @@
 #include <Core/random.h>
 
 #include "save_screenshot.h"
+#include "cJSON.h"
 
 #ifdef __APPLE__
 #include <CommonCrypto/CommonDigest.h>
@@ -197,6 +198,25 @@ static void compute_screen_hash(unsigned char *out)
     unsigned w = GB_get_screen_width(&gb);
     unsigned h = GB_get_screen_height(&gb);
     sha256(pixel_buffer, w * h * sizeof(uint32_t), out);
+}
+
+static void screen_hash_hex(char *out, size_t out_size)
+{
+    unsigned char hash[SHA256_DIGEST_LENGTH];
+    compute_screen_hash(hash);
+    for (int i = 0; i < SHA256_DIGEST_LENGTH && (size_t)(i * 2 + 2) < out_size; i++) {
+        snprintf(out + i * 2, 3, "%02x", hash[i]);
+    }
+}
+
+static bool is_screen_blank(void)
+{
+    unsigned w = GB_get_screen_width(&gb);
+    unsigned h = GB_get_screen_height(&gb);
+    for (unsigned i = 1; i < w * h; i++) {
+        if (pixel_buffer[i] != pixel_buffer[0]) return false;
+    }
+    return true;
 }
 
 /* Run N frames, return total cycle count */
@@ -657,6 +677,387 @@ static void cmd_perf_stop(void)
     printf("]}\n");
 }
 
+/* Build perf summary as cJSON object */
+static cJSON *build_perf_summary(void)
+{
+    cJSON *perf = cJSON_CreateObject();
+    cJSON_AddNumberToObject(perf, "total_frames", profile_frame_count);
+
+    if (profile_frame_count == 0) return perf;
+
+    double sum = 0, min_u = 1.0, max_u = 0.0;
+    unsigned int hist[5] = {0};
+    for (unsigned int i = 0; i < profile_frame_count; i++) {
+        double u = profile_data[i].cpu_usage;
+        sum += u;
+        if (u < min_u) min_u = u;
+        if (u > max_u) max_u = u;
+        if (u < 0.50) hist[0]++;
+        else if (u < 0.75) hist[1]++;
+        else if (u < 0.90) hist[2]++;
+        else if (u < 0.95) hist[3]++;
+        else hist[4]++;
+    }
+    cJSON_AddNumberToObject(perf, "avg_cpu_usage", sum / profile_frame_count);
+    cJSON_AddNumberToObject(perf, "min_cpu_usage", min_u);
+    cJSON_AddNumberToObject(perf, "max_cpu_usage", max_u);
+
+    cJSON *histogram = cJSON_CreateObject();
+    cJSON_AddNumberToObject(histogram, "0-50%", hist[0]);
+    cJSON_AddNumberToObject(histogram, "50-75%", hist[1]);
+    cJSON_AddNumberToObject(histogram, "75-90%", hist[2]);
+    cJSON_AddNumberToObject(histogram, "90-95%", hist[3]);
+    cJSON_AddNumberToObject(histogram, "95-100%", hist[4]);
+    cJSON_AddItemToObject(perf, "cpu_usage_histogram", histogram);
+
+    /* Slowdown events */
+    cJSON *events = cJSON_CreateArray();
+    bool in_slow = false;
+    unsigned int s_start = 0;
+    double s_sum = 0;
+    unsigned int s_unchanged = 0;
+    for (unsigned int i = 0; i <= profile_frame_count; i++) {
+        bool is_slow = (i < profile_frame_count) && profile_data[i].cpu_usage >= 0.95;
+        if (is_slow) {
+            if (!in_slow) { in_slow = true; s_start = i; s_sum = 0; s_unchanged = 0; }
+            s_sum += profile_data[i].cpu_usage;
+            if (!profile_data[i].screen_changed) s_unchanged++;
+        }
+        if ((!is_slow || i == profile_frame_count) && in_slow) {
+            unsigned int dur = i - s_start;
+            if (dur >= 2 && s_unchanged >= 1) {
+                cJSON *ev = cJSON_CreateObject();
+                cJSON_AddNumberToObject(ev, "start_frame", s_start);
+                cJSON_AddNumberToObject(ev, "end_frame", i);
+                cJSON_AddNumberToObject(ev, "duration_frames", dur);
+                cJSON_AddNumberToObject(ev, "avg_cpu_usage", s_sum / dur);
+                cJSON_AddNumberToObject(ev, "screen_unchanged_frames", s_unchanged);
+                cJSON_AddItemToArray(events, ev);
+            }
+            in_slow = false;
+        }
+    }
+    cJSON_AddItemToObject(perf, "slowdown_events", events);
+    return perf;
+}
+
+/* Script mode runner */
+static int run_script(const char *script_path, const char *output_path)
+{
+    /* Read script file */
+    FILE *f = fopen(script_path, "r");
+    if (!f) {
+        fprintf(stderr, "ERR: cannot open script: %s\n", script_path);
+        return 1;
+    }
+    fseek(f, 0, SEEK_END);
+    long fsize = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    char *script_text = malloc(fsize + 1);
+    fread(script_text, 1, fsize, f);
+    script_text[fsize] = '\0';
+    fclose(f);
+
+    cJSON *script = cJSON_Parse(script_text);
+    free(script_text);
+    if (!script) {
+        fprintf(stderr, "ERR: invalid JSON in script\n");
+        return 1;
+    }
+
+    const char *rom = cJSON_GetStringValue(cJSON_GetObjectItem(script, "rom"));
+    cJSON *model_item = cJSON_GetObjectItem(script, "model");
+    if (model_item && cJSON_IsString(model_item)) {
+        current_model = parse_model(model_item->valuestring);
+    }
+
+    cJSON *tests = cJSON_GetObjectItem(script, "tests");
+    if (!cJSON_IsArray(tests)) {
+        fprintf(stderr, "ERR: script must contain a 'tests' array\n");
+        cJSON_Delete(script);
+        return 1;
+    }
+
+    /* Results */
+    cJSON *results_root = cJSON_CreateObject();
+    if (rom) cJSON_AddStringToObject(results_root, "rom", rom);
+    cJSON *results_arr = cJSON_CreateArray();
+    bool all_pass = true;
+
+    cJSON *test;
+    cJSON_ArrayForEach(test, tests) {
+        const char *test_name = cJSON_GetStringValue(cJSON_GetObjectItem(test, "name"));
+        if (!test_name) test_name = "unnamed";
+
+        /* Per-test model override */
+        cJSON *test_model = cJSON_GetObjectItem(test, "model");
+        if (test_model && cJSON_IsString(test_model)) {
+            current_model = parse_model(test_model->valuestring);
+        }
+
+        /* Load ROM (reload for each test for isolation) */
+        if (rom && !init_and_load(rom)) {
+            fprintf(stderr, "ERR: failed to load ROM '%s' for test '%s'\n", rom, test_name);
+            cJSON *result = cJSON_CreateObject();
+            cJSON_AddStringToObject(result, "name", test_name);
+            cJSON_AddBoolToObject(result, "pass", false);
+            cJSON_AddStringToObject(result, "error", "failed to load ROM");
+            cJSON_AddItemToArray(results_arr, result);
+            all_pass = false;
+            continue;
+        }
+
+        /* Load save state if specified */
+        cJSON *save_state_item = cJSON_GetObjectItem(test, "save_state");
+        if (save_state_item && cJSON_IsString(save_state_item)) {
+            if (GB_load_state(&gb, save_state_item->valuestring) != 0) {
+                fprintf(stderr, "Warning: failed to load state '%s' for test '%s'\n",
+                        save_state_item->valuestring, test_name);
+            }
+        }
+
+        cJSON *result = cJSON_CreateObject();
+        cJSON_AddStringToObject(result, "name", test_name);
+        cJSON *screenshots = cJSON_CreateArray();
+        cJSON *assertions = cJSON_CreateArray();
+        bool test_pass = true;
+        bool had_perf = false;
+
+        /* Execute actions */
+        cJSON *actions = cJSON_GetObjectItem(test, "actions");
+        cJSON *action;
+        cJSON_ArrayForEach(action, actions) {
+            /* run N */
+            cJSON *run_item = cJSON_GetObjectItem(action, "run");
+            if (run_item && cJSON_IsNumber(run_item)) {
+                run_frames((unsigned int)run_item->valuedouble);
+                continue;
+            }
+
+            /* press BUTTON frames */
+            cJSON *press_item = cJSON_GetObjectItem(action, "press");
+            if (press_item && cJSON_IsString(press_item)) {
+                GB_key_t key;
+                if (parse_button(press_item->valuestring, &key)) {
+                    unsigned int frames = 1;
+                    cJSON *frames_item = cJSON_GetObjectItem(action, "frames");
+                    if (frames_item && cJSON_IsNumber(frames_item))
+                        frames = (unsigned int)frames_item->valuedouble;
+                    GB_set_key_state(&gb, key, true);
+                    run_frames(frames);
+                    GB_set_key_state(&gb, key, false);
+                }
+                continue;
+            }
+
+            /* screenshot */
+            cJSON *ss_item = cJSON_GetObjectItem(action, "screenshot");
+            if (ss_item && cJSON_IsString(ss_item)) {
+                unsigned w = GB_get_screen_width(&gb);
+                unsigned h = GB_get_screen_height(&gb);
+                save_screenshot(ss_item->valuestring, w, h, pixel_buffer);
+                cJSON_AddItemToArray(screenshots, cJSON_CreateString(ss_item->valuestring));
+                continue;
+            }
+
+            /* save_state */
+            cJSON *ss_save = cJSON_GetObjectItem(action, "save_state");
+            if (ss_save && cJSON_IsString(ss_save)) {
+                GB_save_state(&gb, ss_save->valuestring);
+                continue;
+            }
+
+            /* load_state */
+            cJSON *ss_load = cJSON_GetObjectItem(action, "load_state");
+            if (ss_load && cJSON_IsString(ss_load)) {
+                GB_load_state(&gb, ss_load->valuestring);
+                continue;
+            }
+
+            /* perf_start */
+            if (cJSON_IsTrue(cJSON_GetObjectItem(action, "perf_start"))) {
+                if (!profile_data) {
+                    profile_data = malloc(MAX_PROFILE_FRAMES * sizeof(frame_perf_t));
+                }
+                profile_frame_count = 0;
+                prev_hash_valid = false;
+                profiling_active = true;
+                continue;
+            }
+
+            /* perf_stop */
+            if (cJSON_IsTrue(cJSON_GetObjectItem(action, "perf_stop"))) {
+                profiling_active = false;
+                had_perf = true;
+                continue;
+            }
+
+            /* Assertions */
+
+            /* assert_screen_not_blank */
+            if (cJSON_IsTrue(cJSON_GetObjectItem(action, "assert_screen_not_blank"))) {
+                bool blank = is_screen_blank();
+                cJSON *a = cJSON_CreateObject();
+                cJSON_AddStringToObject(a, "type", "screen_not_blank");
+                cJSON_AddBoolToObject(a, "pass", !blank);
+                cJSON_AddItemToArray(assertions, a);
+                if (blank) test_pass = false;
+                continue;
+            }
+
+            /* assert_screen_hash */
+            cJSON *hash_item = cJSON_GetObjectItem(action, "assert_screen_hash");
+            if (hash_item && cJSON_IsString(hash_item)) {
+                char actual[65] = {0};
+                screen_hash_hex(actual, sizeof(actual));
+                bool match = strcasecmp(actual, hash_item->valuestring) == 0;
+                cJSON *a = cJSON_CreateObject();
+                cJSON_AddStringToObject(a, "type", "screen_hash");
+                cJSON_AddStringToObject(a, "expected", hash_item->valuestring);
+                cJSON_AddStringToObject(a, "actual", actual);
+                cJSON_AddBoolToObject(a, "pass", match);
+                cJSON_AddItemToArray(assertions, a);
+                if (!match) test_pass = false;
+                continue;
+            }
+
+            /* assert_max_cpu_usage */
+            cJSON *max_cpu = cJSON_GetObjectItem(action, "assert_max_cpu_usage");
+            if (max_cpu && cJSON_IsNumber(max_cpu)) {
+                double threshold = max_cpu->valuedouble;
+                double actual_max = 0;
+                for (unsigned int i = 0; i < profile_frame_count; i++) {
+                    if (profile_data[i].cpu_usage > actual_max)
+                        actual_max = profile_data[i].cpu_usage;
+                }
+                bool pass = actual_max <= threshold;
+                cJSON *a = cJSON_CreateObject();
+                cJSON_AddStringToObject(a, "type", "max_cpu_usage");
+                cJSON_AddNumberToObject(a, "threshold", threshold);
+                cJSON_AddNumberToObject(a, "actual", actual_max);
+                cJSON_AddBoolToObject(a, "pass", pass);
+                cJSON_AddItemToArray(assertions, a);
+                if (!pass) test_pass = false;
+                continue;
+            }
+
+            /* assert_avg_cpu_usage */
+            cJSON *avg_cpu = cJSON_GetObjectItem(action, "assert_avg_cpu_usage");
+            if (avg_cpu && cJSON_IsNumber(avg_cpu)) {
+                double threshold = avg_cpu->valuedouble;
+                double sum = 0;
+                for (unsigned int i = 0; i < profile_frame_count; i++)
+                    sum += profile_data[i].cpu_usage;
+                double actual_avg = profile_frame_count > 0 ? sum / profile_frame_count : 0;
+                bool pass = actual_avg <= threshold;
+                cJSON *a = cJSON_CreateObject();
+                cJSON_AddStringToObject(a, "type", "avg_cpu_usage");
+                cJSON_AddNumberToObject(a, "threshold", threshold);
+                cJSON_AddNumberToObject(a, "actual", actual_avg);
+                cJSON_AddBoolToObject(a, "pass", pass);
+                cJSON_AddItemToArray(assertions, a);
+                if (!pass) test_pass = false;
+                continue;
+            }
+
+            /* assert_no_slowdown_events */
+            if (cJSON_IsTrue(cJSON_GetObjectItem(action, "assert_no_slowdown_events"))) {
+                /* Count slowdown events */
+                unsigned int event_count = 0;
+                bool in_slow = false;
+                unsigned int s_start_local = 0, s_unchanged_local = 0;
+                for (unsigned int i = 0; i <= profile_frame_count; i++) {
+                    bool is_slow = (i < profile_frame_count) && profile_data[i].cpu_usage >= 0.95;
+                    if (is_slow) {
+                        if (!in_slow) { in_slow = true; s_start_local = i; s_unchanged_local = 0; }
+                        if (!profile_data[i].screen_changed) s_unchanged_local++;
+                    }
+                    if ((!is_slow || i == profile_frame_count) && in_slow) {
+                        if ((i - s_start_local) >= 2 && s_unchanged_local >= 1) event_count++;
+                        in_slow = false;
+                    }
+                }
+                cJSON *a = cJSON_CreateObject();
+                cJSON_AddStringToObject(a, "type", "no_slowdown_events");
+                cJSON_AddNumberToObject(a, "count", event_count);
+                cJSON_AddBoolToObject(a, "pass", event_count == 0);
+                cJSON_AddItemToArray(assertions, a);
+                if (event_count > 0) test_pass = false;
+                continue;
+            }
+
+            /* assert_memory */
+            cJSON *mem_assert = cJSON_GetObjectItem(action, "assert_memory");
+            if (mem_assert && cJSON_IsObject(mem_assert)) {
+                const char *addr_str = cJSON_GetStringValue(cJSON_GetObjectItem(mem_assert, "address"));
+                const char *expected_str = cJSON_GetStringValue(cJSON_GetObjectItem(mem_assert, "expected"));
+                if (addr_str && expected_str) {
+                    unsigned int addr = (unsigned int)strtoul(addr_str, NULL, 16);
+                    size_t expected_len = strlen(expected_str) / 2;
+                    char actual_hex[513] = {0};
+                    bool match = true;
+                    for (size_t j = 0; j < expected_len && j < 256; j++) {
+                        uint8_t byte = GB_read_memory(&gb, (uint16_t)(addr + j));
+                        snprintf(actual_hex + j * 2, 3, "%02X", byte);
+                        unsigned int expected_byte;
+                        sscanf(expected_str + j * 2, "%2x", &expected_byte);
+                        if (byte != (uint8_t)expected_byte) match = false;
+                    }
+                    cJSON *a = cJSON_CreateObject();
+                    cJSON_AddStringToObject(a, "type", "memory");
+                    cJSON_AddStringToObject(a, "address", addr_str);
+                    cJSON_AddStringToObject(a, "expected", expected_str);
+                    cJSON_AddStringToObject(a, "actual", actual_hex);
+                    cJSON_AddBoolToObject(a, "pass", match);
+                    cJSON_AddItemToArray(assertions, a);
+                    if (!match) test_pass = false;
+                }
+                continue;
+            }
+        }
+
+        cJSON_AddBoolToObject(result, "pass", test_pass);
+        if (cJSON_GetArraySize(screenshots) > 0)
+            cJSON_AddItemToObject(result, "screenshots", screenshots);
+        else
+            cJSON_Delete(screenshots);
+        if (cJSON_GetArraySize(assertions) > 0)
+            cJSON_AddItemToObject(result, "assertions", assertions);
+        else
+            cJSON_Delete(assertions);
+        if (had_perf)
+            cJSON_AddItemToObject(result, "perf", build_perf_summary());
+        cJSON_AddItemToArray(results_arr, result);
+        if (!test_pass) all_pass = false;
+
+        fprintf(stderr, "Test '%s': %s\n", test_name, test_pass ? "PASS" : "FAIL");
+    }
+
+    cJSON_AddBoolToObject(results_root, "pass", all_pass);
+    cJSON_AddItemToObject(results_root, "results", results_arr);
+
+    /* Write output */
+    char *json_out = cJSON_Print(results_root);
+    if (output_path) {
+        FILE *out = fopen(output_path, "w");
+        if (out) {
+            fputs(json_out, out);
+            fclose(out);
+            fprintf(stderr, "Results written to %s\n", output_path);
+        } else {
+            fprintf(stderr, "ERR: cannot write to %s, printing to stdout\n", output_path);
+            puts(json_out);
+        }
+    } else {
+        puts(json_out);
+    }
+
+    free(json_out);
+    cJSON_Delete(results_root);
+    cJSON_Delete(script);
+    return all_pass ? 0 : 1;
+}
+
 /* Main REPL loop */
 static void repl(void)
 {
@@ -734,6 +1135,8 @@ int main(int argc, char **argv)
     fprintf(stderr, "SameBoy Agent Tester v" GB_VERSION "\n");
 
     const char *rom_path = NULL;
+    const char *script_path = NULL;
+    const char *output_path = NULL;
 
     GB_random_set_enabled(false);
 
@@ -752,6 +1155,14 @@ int main(int argc, char **argv)
             boot_rom_path = argv[++i];
             continue;
         }
+        if (strcmp(argv[i], "--script") == 0 && i + 1 < argc) {
+            script_path = argv[++i];
+            continue;
+        }
+        if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
+            output_path = argv[++i];
+            continue;
+        }
         if (strcmp(argv[i], "--interactive") == 0) {
             continue; /* Default mode */
         }
@@ -760,8 +1171,15 @@ int main(int argc, char **argv)
             continue;
         }
         fprintf(stderr, "Unknown option: %s\n", argv[i]);
-        fprintf(stderr, "Usage: %s [--interactive] [--model <DMG|CGB|AGB|SGB>] [--boot <path>] [rom]\n", argv[0]);
+        fprintf(stderr, "Usage: %s [--interactive] [--script <path.json>] [--output <path.json>] [--model <DMG|CGB|AGB|SGB>] [--boot <path>] [rom]\n", argv[0]);
         return 1;
+    }
+
+    /* Script mode */
+    if (script_path) {
+        int ret = run_script(script_path, output_path);
+        if (gb_inited) GB_free(&gb);
+        return ret;
     }
 
     /* If ROM provided on command line, load it before entering REPL */
