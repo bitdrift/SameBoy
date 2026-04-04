@@ -32,6 +32,21 @@ static bool gb_inited = false;
 static const char *boot_rom_path = NULL;
 static char current_rom_path[1024] = {0};
 
+/* Profiling state */
+#define MAX_PROFILE_FRAMES 36000  /* 10 minutes at 60fps */
+typedef struct {
+    double cpu_usage;
+    uint32_t busy_cycles;
+    uint32_t idle_cycles;
+    bool screen_changed;
+} frame_perf_t;
+
+static bool profiling_active = false;
+static frame_perf_t *profile_data = NULL;
+static unsigned int profile_frame_count = 0;
+static unsigned char prev_screen_hash[32] = {0};
+static bool prev_hash_valid = false;
+
 typedef enum {
     MODEL_CGB,
     MODEL_DMG,
@@ -177,12 +192,34 @@ static model_t parse_model(const char *str)
     return MODEL_CGB;
 }
 
+static void compute_screen_hash(unsigned char *out)
+{
+    unsigned w = GB_get_screen_width(&gb);
+    unsigned h = GB_get_screen_height(&gb);
+    sha256(pixel_buffer, w * h * sizeof(uint32_t), out);
+}
+
 /* Run N frames, return total cycle count */
 static uint64_t run_frames(unsigned int n)
 {
     uint64_t total_ns = 0;
     for (unsigned int i = 0; i < n; i++) {
         total_ns += GB_run_frame(&gb);
+
+        if (profiling_active && profile_frame_count < MAX_PROFILE_FRAMES) {
+            frame_perf_t *f = &profile_data[profile_frame_count];
+            f->cpu_usage = GB_debugger_get_frame_cpu_usage(&gb);
+            f->busy_cycles = gb.last_frame_busy_cycles;
+            f->idle_cycles = gb.last_frame_idle_cycles;
+
+            unsigned char cur_hash[32];
+            compute_screen_hash(cur_hash);
+            f->screen_changed = !prev_hash_valid || memcmp(cur_hash, prev_screen_hash, 32) != 0;
+            memcpy(prev_screen_hash, cur_hash, 32);
+            prev_hash_valid = true;
+
+            profile_frame_count++;
+        }
     }
     return total_ns;
 }
@@ -527,6 +564,99 @@ static void cmd_perf_frame(void)
            gb.last_frame_idle_cycles);
 }
 
+static void cmd_perf_start(void)
+{
+    if (!gb_inited) { printf("ERR no ROM loaded\n"); return; }
+
+    if (!profile_data) {
+        profile_data = malloc(MAX_PROFILE_FRAMES * sizeof(frame_perf_t));
+        if (!profile_data) { printf("ERR failed to allocate profiling buffer\n"); return; }
+    }
+
+    profile_frame_count = 0;
+    prev_hash_valid = false;
+    profiling_active = true;
+    printf("OK\n");
+}
+
+static void cmd_perf_stop(void)
+{
+    if (!profiling_active) { printf("ERR profiling not active\n"); return; }
+
+    profiling_active = false;
+
+    if (profile_frame_count == 0) {
+        printf("OK {\"total_frames\":0}\n");
+        return;
+    }
+
+    /* Compute summary stats */
+    double sum_usage = 0, min_usage = 1.0, max_usage = 0.0;
+    unsigned int histogram[5] = {0}; /* 0-50, 50-75, 75-90, 90-95, 95-100 */
+
+    for (unsigned int i = 0; i < profile_frame_count; i++) {
+        double u = profile_data[i].cpu_usage;
+        sum_usage += u;
+        if (u < min_usage) min_usage = u;
+        if (u > max_usage) max_usage = u;
+
+        if (u < 0.50) histogram[0]++;
+        else if (u < 0.75) histogram[1]++;
+        else if (u < 0.90) histogram[2]++;
+        else if (u < 0.95) histogram[3]++;
+        else histogram[4]++;
+    }
+
+    double avg_usage = sum_usage / profile_frame_count;
+
+    /* Detect slowdown events: consecutive frames with >95% CPU and unchanged screen */
+    printf("OK {\"total_frames\":%u,\"avg_cpu_usage\":%.4f,\"min_cpu_usage\":%.4f,\"max_cpu_usage\":%.4f,"
+           "\"cpu_usage_histogram\":{\"0-50%%\":%u,\"50-75%%\":%u,\"75-90%%\":%u,\"90-95%%\":%u,\"95-100%%\":%u},"
+           "\"slowdown_events\":[",
+           profile_frame_count, avg_usage, min_usage, max_usage,
+           histogram[0], histogram[1], histogram[2], histogram[3], histogram[4]);
+
+    /* Slowdown detection */
+    bool in_slowdown = false;
+    unsigned int slowdown_start = 0;
+    double slowdown_usage_sum = 0;
+    unsigned int slowdown_unchanged = 0;
+    bool first_event = true;
+
+    for (unsigned int i = 0; i < profile_frame_count; i++) {
+        bool is_slow = profile_data[i].cpu_usage >= 0.95;
+        bool unchanged = !profile_data[i].screen_changed;
+
+        if (is_slow) {
+            if (!in_slowdown) {
+                in_slowdown = true;
+                slowdown_start = i;
+                slowdown_usage_sum = 0;
+                slowdown_unchanged = 0;
+            }
+            slowdown_usage_sum += profile_data[i].cpu_usage;
+            if (unchanged) slowdown_unchanged++;
+        }
+
+        if ((!is_slow || i == profile_frame_count - 1) && in_slowdown) {
+            unsigned int end = is_slow ? i + 1 : i;
+            unsigned int duration = end - slowdown_start;
+            /* Only report if at least 2 frames and some unchanged screens */
+            if (duration >= 2 && slowdown_unchanged >= 1) {
+                if (!first_event) printf(",");
+                printf("{\"start_frame\":%u,\"end_frame\":%u,\"duration_frames\":%u,"
+                       "\"avg_cpu_usage\":%.4f,\"screen_unchanged_frames\":%u}",
+                       slowdown_start, end, duration,
+                       slowdown_usage_sum / duration, slowdown_unchanged);
+                first_event = false;
+            }
+            in_slowdown = false;
+        }
+    }
+
+    printf("]}\n");
+}
+
 /* Main REPL loop */
 static void repl(void)
 {
@@ -585,6 +715,10 @@ static void repl(void)
             cmd_screenshot(args ? args : "");
         } else if (strcmp(cmd, "perf_frame") == 0) {
             cmd_perf_frame();
+        } else if (strcmp(cmd, "perf_start") == 0) {
+            cmd_perf_start();
+        } else if (strcmp(cmd, "perf_stop") == 0) {
+            cmd_perf_stop();
         } else if (strcmp(cmd, "screen_hash") == 0) {
             cmd_screen_hash();
         } else {
