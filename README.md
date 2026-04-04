@@ -1,4 +1,23 @@
-# SameBoy
+# SameBoy (Copenhagen Fork)
+
+This is a fork of [SameBoy](https://github.com/LIJI32/SameBoy), an open source Game Boy (DMG) and Game Boy Color (CGB) emulator written in portable C. Visit [the upstream website](https://sameboy.github.io/).
+
+## Fork Changes
+
+This fork adds an **Agent Test Harness** — a headless automation tool that allows AI agents and CI systems to run Game Boy ROMs, execute scripted input sequences, capture screenshots, and collect performance profiles. It is designed to remove manual playtesting from the development loop.
+
+Key additions:
+- `AgentTester/` — headless test runner with interactive (REPL) and batch (JSON script) modes
+- **Performance profiling** — per-frame CPU usage measurement to detect slowdowns visible to players on real hardware
+- **Assertion framework** — screen hash comparison, blank screen detection, CPU usage thresholds, memory checks
+
+See [AGENT_TEST_HARNESS.md](AGENT_TEST_HARNESS.md) for the full product requirements document.
+
+All upstream SameBoy features, compatibility, and accuracy are preserved. The Agent Test Harness is a new build target (`make agent-tester`) that links against the existing Core library without modifying it.
+
+---
+
+## Upstream SameBoy
 
 SameBoy is an open source Game Boy (DMG) and Game Boy Color (CGB) emulator, written in portable C. It has a native Cocoa frontend for macOS, an SDL frontend for other operating systems, and a libretro core. It also includes a text-based debugger with an expression evaluator. Visit [the website](https://sameboy.github.io/).
 

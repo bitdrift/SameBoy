@@ -400,9 +400,11 @@ endif
 ifeq ($(PLATFORM),windows32)
 SDL_TARGET := $(BIN)/SDL/sameboy.exe $(BIN)/SDL/SDL2.dll $(BIN)/SDL/sameboy_debugger.txt
 TESTER_TARGET := $(BIN)/tester/sameboy_tester.exe
+AGENT_TESTER_TARGET := $(BIN)/agent-tester/sameboy_agent_tester.exe
 else
 SDL_TARGET := $(BIN)/SDL/sameboy
 TESTER_TARGET := $(BIN)/tester/sameboy_tester
+AGENT_TESTER_TARGET := $(BIN)/agent-tester/sameboy_agent_tester
 endif
 
 cocoa: $(BIN)/SameBoy.app
@@ -410,6 +412,7 @@ xdg-thumbnailer: $(BIN)/XdgThumbnailer/sameboy-thumbnailer
 sdl: $(SDL_TARGET) $(BIN)/SDL/dmg_boot.bin $(BIN)/SDL/mgb_boot.bin $(BIN)/SDL/cgb0_boot.bin $(BIN)/SDL/cgb_boot.bin $(BIN)/SDL/agb_boot.bin $(BIN)/SDL/sgb_boot.bin $(BIN)/SDL/sgb2_boot.bin $(BIN)/SDL/LICENSE $(BIN)/SDL/registers.sym $(BIN)/SDL/background.bmp $(BIN)/SDL/Shaders $(BIN)/SDL/Palettes
 bootroms: $(BIN)/BootROMs/agb_boot.bin $(BIN)/BootROMs/cgb_boot.bin $(BIN)/BootROMs/cgb0_boot.bin $(BIN)/BootROMs/dmg_boot.bin $(BIN)/BootROMs/mgb_boot.bin $(BIN)/BootROMs/sgb_boot.bin $(BIN)/BootROMs/sgb2_boot.bin
 tester: $(TESTER_TARGET) $(BIN)/tester/dmg_boot.bin $(BIN)/tester/cgb_boot.bin $(BIN)/tester/agb_boot.bin $(BIN)/tester/sgb_boot.bin $(BIN)/tester/sgb2_boot.bin
+agent-tester: $(AGENT_TESTER_TARGET) $(BIN)/agent-tester/dmg_boot.bin $(BIN)/agent-tester/cgb_boot.bin $(BIN)/agent-tester/agb_boot.bin $(BIN)/agent-tester/sgb_boot.bin $(BIN)/agent-tester/sgb2_boot.bin
 _ios: $(BIN)/SameBoy-iOS.app $(OBJ)/installer
 ios-ipa: $(BIN)/SameBoy-iOS.ipa
 ios-deb: $(BIN)/SameBoy-iOS.deb
@@ -432,6 +435,18 @@ CORE_SOURCES := $(filter-out $(CORE_FILTER),$(shell ls Core/*.c))
 CORE_HEADERS := $(shell ls Core/*.h)
 SDL_SOURCES := $(shell ls SDL/*.c) $(OPEN_DIALOG) $(SAVE_PNG) $(patsubst %,SDL/audio/%.c,$(SDL_AUDIO_DRIVERS))
 TESTER_SOURCES := $(shell ls Tester/*.c)
+AGENT_TESTER_SOURCES := $(filter-out AgentTester/save_screenshot_libpng.c,$(shell ls AgentTester/*.c))
+ifeq ($(PLATFORM),Darwin)
+AGENT_TESTER_SOURCES += AgentTester/save_screenshot_appkit.m
+AGENT_TESTER_LDFLAGS := -framework AppKit
+else
+ifeq ($(PLATFORM),windows32)
+AGENT_TESTER_LDFLAGS :=
+else
+AGENT_TESTER_SOURCES += AgentTester/save_screenshot_libpng.c
+AGENT_TESTER_LDFLAGS := -lpng
+endif
+endif
 IOS_SOURCES := $(filter-out iOS/installer.m, $(shell ls iOS/*.m)) $(shell ls AppleCommon/*.m)
 COCOA_SOURCES := $(shell ls Cocoa/*.m) $(shell ls HexFiend/*.m) $(shell ls JoyKit/*.m) $(shell ls AppleCommon/*.m)
 QUICKLOOK_SOURCES := $(shell ls QuickLook/*.m) $(shell ls QuickLook/*.c)
@@ -448,6 +463,7 @@ IOS_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(IOS_SOURCES))
 QUICKLOOK_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(QUICKLOOK_SOURCES))
 SDL_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(SDL_SOURCES))
 TESTER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(TESTER_SOURCES))
+AGENT_TESTER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(AGENT_TESTER_SOURCES))
 XDG_THUMBNAILER_OBJECTS := $(patsubst %,$(OBJ)/%.o,$(XDG_THUMBNAILER_SOURCES)) $(OBJ)/XdgThumbnailer/resources.c.o
 
 lib: headers
@@ -462,6 +478,9 @@ ifneq ($(filter $(MAKECMDGOALS),sdl),)
 endif
 ifneq ($(filter $(MAKECMDGOALS),tester),)
 -include $(TESTER_OBJECTS:.o=.dep)
+endif
+ifneq ($(filter $(MAKECMDGOALS),agent-tester),)
+-include $(AGENT_TESTER_OBJECTS:.o=.dep)
 endif
 ifneq ($(filter $(MAKECMDGOALS),cocoa),)
 -include $(COCOA_OBJECTS:.o=.dep)
@@ -736,6 +755,24 @@ $(BIN)/tester/%.bin: $(BOOTROMS_DIR)/%.bin
 	-@$(MKDIR) -p $(dir $@)
 	cp -f $< $@
 
+# Agent Tester
+
+$(BIN)/agent-tester/sameboy_agent_tester: $(CORE_OBJECTS) $(AGENT_TESTER_OBJECTS)
+	-@$(MKDIR) -p $(dir $@)
+	$(CC) $^ -o $@ $(LDFLAGS) $(AGENT_TESTER_LDFLAGS)
+ifeq ($(CONF), release)
+	$(STRIP) $@
+	$(CODESIGN) $@
+endif
+
+$(BIN)/agent-tester/sameboy_agent_tester.exe: $(CORE_OBJECTS) $(AGENT_TESTER_OBJECTS)
+	-@$(MKDIR) -p $(dir $@)
+	$(CC) $^ -o $@ $(LDFLAGS) $(AGENT_TESTER_LDFLAGS) -Wl,/subsystem:console
+
+$(BIN)/agent-tester/%.bin: $(BOOTROMS_DIR)/%.bin
+	-@$(MKDIR) -p $(dir $@)
+	cp -f $< $@
+
 $(BIN)/SameBoy.app/Contents/Resources/%.bin: $(BOOTROMS_DIR)/%.bin
 	-@$(MKDIR) -p $(dir $@)
 	cp -f $< $@
@@ -938,4 +975,21 @@ $(OBJ)/Windows/msvcrt.lib: Windows/msvcrt.def
 clean:
 	rm -rf build
 
-.PHONY: libretro tester cocoa ios _ios ios-ipa ios-deb liblib-unsupported bootroms
+# End-to-end tests for agent tester using the GBDK test ROM
+test-agent-tester: agent-tester
+	@echo "Running agent-tester E2E tests..."
+	@fail=0; \
+	for script in AgentTester/test_rom/test_*.json; do \
+		name=$$(basename $$script .json); \
+		printf "  %-20s " "$$name"; \
+		if $(AGENT_TESTER_TARGET) --script $$script --output /tmp/$$name_result.json 2>/dev/null; then \
+			echo "PASS"; \
+		else \
+			echo "FAIL"; \
+			fail=1; \
+		fi; \
+	done; \
+	if [ $$fail -eq 1 ]; then echo "SOME TESTS FAILED"; exit 1; fi; \
+	echo "All agent-tester tests passed."
+
+.PHONY: libretro tester cocoa ios _ios ios-ipa ios-deb liblib-unsupported bootroms test-agent-tester

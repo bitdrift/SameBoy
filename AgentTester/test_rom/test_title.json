@@ -1,0 +1,22 @@
+{
+  "rom": "AgentTester/test_rom/harness_test.gb",
+  "model": "CGB",
+  "tests": [
+    {
+      "name": "title_screen_renders",
+      "actions": [
+        { "run": 400 },
+        { "screenshot": "/tmp/agent_test_title.png" },
+        { "assert_screen_not_blank": true }
+      ]
+    },
+    {
+      "name": "title_screen_deterministic",
+      "actions": [
+        { "run": 400 },
+        { "screenshot": "/tmp/agent_test_title_det.png" },
+        { "assert_screen_hash": "129faa007ddb4e0c6bc0c7acd5c88efffbfd7bf88a148031a805090b3377fce0" }
+      ]
+    }
+  ]
+}

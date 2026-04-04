@@ -1,0 +1,38 @@
+{
+  "rom": "AgentTester/test_rom/harness_test.gb",
+  "model": "CGB",
+  "tests": [
+    {
+      "name": "perf_idle_low_cpu",
+      "actions": [
+        { "run": 400 },
+        { "press": "start", "frames": 10 },
+        { "run": 30 },
+        { "press": "start", "frames": 10 },
+        { "run": 30 },
+        { "perf_start": true },
+        { "run": 120 },
+        { "perf_stop": true },
+        { "assert_max_cpu_usage": 0.25 },
+        { "assert_no_slowdown_events": true }
+      ]
+    },
+    {
+      "name": "perf_stress_high_cpu",
+      "actions": [
+        { "run": 400 },
+        { "press": "start", "frames": 10 },
+        { "run": 30 },
+        { "press": "start", "frames": 10 },
+        { "run": 30 },
+        { "press": "a", "frames": 10 },
+        { "run": 10 },
+        { "screenshot": "/tmp/agent_test_perf_stress.png" },
+        { "perf_start": true },
+        { "run": 120 },
+        { "perf_stop": true },
+        { "assert_avg_cpu_usage": 1.01 }
+      ]
+    }
+  ]
+}
