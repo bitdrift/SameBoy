@@ -1,3 +1,6 @@
+// Needs low-level access to gb struct for CPU usage cycle counts
+#define GB_INTERNAL
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdbool.h>
@@ -513,6 +516,17 @@ static void cmd_set(const char *args)
     }
 }
 
+static void cmd_perf_frame(void)
+{
+    if (!gb_inited) { printf("ERR no ROM loaded\n"); return; }
+
+    double usage = GB_debugger_get_frame_cpu_usage(&gb);
+    printf("OK cpu_usage=%.4f busy=%u idle=%u\n",
+           usage,
+           gb.last_frame_busy_cycles,
+           gb.last_frame_idle_cycles);
+}
+
 /* Main REPL loop */
 static void repl(void)
 {
@@ -569,6 +583,8 @@ static void repl(void)
             cmd_registers();
         } else if (strcmp(cmd, "screenshot") == 0) {
             cmd_screenshot(args ? args : "");
+        } else if (strcmp(cmd, "perf_frame") == 0) {
+            cmd_perf_frame();
         } else if (strcmp(cmd, "screen_hash") == 0) {
             cmd_screen_hash();
         } else {
