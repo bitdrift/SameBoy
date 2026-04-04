@@ -975,4 +975,21 @@ $(OBJ)/Windows/msvcrt.lib: Windows/msvcrt.def
 clean:
 	rm -rf build
 
-.PHONY: libretro tester cocoa ios _ios ios-ipa ios-deb liblib-unsupported bootroms
+# End-to-end tests for agent tester using the GBDK test ROM
+test-agent-tester: agent-tester
+	@echo "Running agent-tester E2E tests..."
+	@fail=0; \
+	for script in AgentTester/test_rom/test_*.json; do \
+		name=$$(basename $$script .json); \
+		printf "  %-20s " "$$name"; \
+		if $(AGENT_TESTER_TARGET) --script $$script --output /tmp/$$name_result.json 2>/dev/null; then \
+			echo "PASS"; \
+		else \
+			echo "FAIL"; \
+			fail=1; \
+		fi; \
+	done; \
+	if [ $$fail -eq 1 ]; then echo "SOME TESTS FAILED"; exit 1; fi; \
+	echo "All agent-tester tests passed."
+
+.PHONY: libretro tester cocoa ios _ios ios-ipa ios-deb liblib-unsupported bootroms test-agent-tester

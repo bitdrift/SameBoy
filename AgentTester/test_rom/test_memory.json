@@ -1,0 +1,21 @@
+{
+  "rom": "AgentTester/test_rom/harness_test.gb",
+  "model": "CGB",
+  "tests": [
+    {
+      "name": "memory_probe_deadbeef",
+      "actions": [
+        { "run": 400 },
+        { "press": "start", "frames": 10 },
+        { "run": 30 },
+        { "press": "start", "frames": 10 },
+        { "run": 30 },
+        { "press": "start", "frames": 10 },
+        { "run": 30 },
+        { "screenshot": "/tmp/agent_test_memory.png" },
+        { "assert_screen_not_blank": true },
+        { "assert_memory": { "address": "C0A0", "expected": "DEAD" } }
+      ]
+    }
+  ]
+}
