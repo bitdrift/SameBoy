@@ -1708,6 +1708,17 @@ void GB_cpu_run(GB_gameboy_t *gb)
         if (unlikely(gb->execution_callback)) {
             gb->execution_callback(gb, gb->pc - 1, opcode);
         }
+#ifndef GB_DISABLE_DEBUGGER
+        if (unlikely(gb->frame_perf_callback)) {
+            uint16_t pc = gb->pc - 1;
+            uint8_t mask = 1u << (pc & 7);
+            uint8_t *byte = &gb->pc_visited_bitmap[pc >> 3];
+            if (!(*byte & mask)) {
+                *byte |= mask;
+                gb->current_frame_unique_pcs++;
+            }
+        }
+#endif
         if (unlikely(gb->halt_bug)) {
             gb->pc--;
             gb->halt_bug = false;

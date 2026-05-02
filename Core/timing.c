@@ -484,8 +484,43 @@ void GB_advance_cycles(GB_gameboy_t *gb, uint8_t cycles)
     
 #ifndef GB_DISABLE_DEBUGGER
     gb->absolute_debugger_ticks += cycles;
-    *((gb->halted || gb->stopped)? &gb->current_frame_idle_cycles : &gb->current_frame_busy_cycles) += cycles;
-    *((gb->halted || gb->stopped)? &gb->current_second_idle_cycles : &gb->current_second_busy_cycles) += cycles;
+
+    /* Spin-loop detection: if no game-state writes have happened for a stretch
+       of cycles, the CPU is busy-waiting (e.g. polling LY). Treat that as idle
+       so cpu_pct is meaningful for non-HALT-using games like Tetris. */
+    bool spinning = false;
+    if (gb->current_frame_mem_writes != gb->mem_writes_snapshot) {
+        gb->mem_writes_snapshot = gb->current_frame_mem_writes;
+        gb->cycles_since_last_write = 0;
+    }
+    else {
+        gb->cycles_since_last_write += cycles;
+        if (gb->cycles_since_last_write > 256) {
+            spinning = true;
+        }
+    }
+    bool effectively_idle = gb->halted || gb->stopped || spinning;
+    *(effectively_idle? &gb->current_frame_idle_cycles : &gb->current_frame_busy_cycles) += cycles;
+    *(effectively_idle? &gb->current_second_idle_cycles : &gb->current_second_busy_cycles) += cycles;
+
+    if (unlikely(gb->pc_sample_callback && gb->pc_sample_interval)) {
+        gb->pc_sample_accumulator += cycles;
+        while (gb->pc_sample_accumulator >= gb->pc_sample_interval) {
+            gb->pc_sample_accumulator -= gb->pc_sample_interval;
+            uint16_t pc = gb->pc;
+            uint16_t bank;
+            if (pc < 0x4000) {
+                bank = gb->mbc_rom0_bank;
+            }
+            else if (pc < 0x8000) {
+                bank = gb->mbc_rom_bank;
+            }
+            else {
+                bank = 0;
+            }
+            gb->pc_sample_callback(gb, pc, bank);
+        }
+    }
 #endif
     
     // Not affected by speed boost

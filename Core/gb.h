@@ -284,6 +284,16 @@ typedef void (*GB_boot_rom_load_callback_t)(GB_gameboy_t *gb, GB_boot_rom_t type
 typedef void (*GB_execution_callback_t)(GB_gameboy_t *gb, uint16_t address, uint8_t opcode);
 typedef void (*GB_lcd_line_callback_t)(GB_gameboy_t *gb, uint8_t line);
 typedef void (*GB_lcd_status_callback_t)(GB_gameboy_t *gb, bool on);
+typedef struct {
+    GB_vblank_type_t vblank_type;
+    uint32_t busy_cycles;     // Cycles where !halted && !stopped
+    uint32_t idle_cycles;     // Cycles where halted || stopped
+    uint32_t mem_writes;      // Writes to WRAM/VRAM/OAM/HRAM (excludes ROM/IO)
+    uint32_t unique_pcs;      // Distinct PCs executed this frame
+} GB_frame_perf_t;
+typedef void (*GB_frame_perf_callback_t)(GB_gameboy_t *gb, const GB_frame_perf_t *perf);
+typedef void (*GB_pc_sample_callback_t)(GB_gameboy_t *gb, uint16_t pc, uint16_t bank);
+typedef void (*GB_tag_callback_t)(GB_gameboy_t *gb, uint8_t value, uint16_t pc, uint16_t bank);
 
 struct GB_breakpoint_s;
 struct GB_watchpoint_s;
@@ -736,6 +746,11 @@ struct GB_gameboy_internal_s {
         GB_execution_callback_t execution_callback;
         GB_lcd_line_callback_t lcd_line_callback;
         GB_lcd_status_callback_t lcd_status_callback;
+        GB_frame_perf_callback_t frame_perf_callback;
+        GB_pc_sample_callback_t pc_sample_callback;
+        uint32_t pc_sample_interval;
+        uint32_t pc_sample_accumulator;
+        GB_tag_callback_t tag_callback;
                
 #ifndef GB_DISABLE_DEBUGGER
         /*** Debugger ***/
@@ -787,6 +802,11 @@ struct GB_gameboy_internal_s {
         /* CPU usage */
         uint32_t current_frame_idle_cycles, current_frame_busy_cycles;
         uint32_t last_frame_idle_cycles, last_frame_busy_cycles;
+        uint32_t current_frame_mem_writes, last_frame_mem_writes;
+        uint32_t current_frame_unique_pcs, last_frame_unique_pcs;
+        uint8_t  pc_visited_bitmap[8192]; // 1 bit per 16-bit address
+        uint32_t cycles_since_last_write;
+        uint32_t mem_writes_snapshot;
         
         uint32_t current_second_idle_cycles, current_second_busy_cycles;
         uint32_t last_second_idle_cycles, last_second_busy_cycles;
@@ -975,6 +995,29 @@ void GB_set_boot_rom_load_callback(GB_gameboy_t *gb, GB_boot_rom_load_callback_t
 void GB_set_execution_callback(GB_gameboy_t *gb, GB_execution_callback_t callback);
 void GB_set_lcd_line_callback(GB_gameboy_t *gb, GB_lcd_line_callback_t callback);
 void GB_set_lcd_status_callback(GB_gameboy_t *gb, GB_lcd_status_callback_t callback);
+/* Fires at every vblank with stats for the frame just completed. Filter on
+   perf->vblank_type if only true frames are wanted. busy_cycles+idle_cycles
+   is ~140448 for a normal-speed frame in 16MHz units. mem_writes counts
+   writes to WRAM/VRAM/OAM/HRAM (game state, excludes ROM and IO). unique_pcs
+   counts distinct PCs executed this frame -- a polling loop hits 3-4 PCs,
+   real game logic hits hundreds. Disabled when built with GB_DISABLE_DEBUGGER. */
+void GB_set_frame_perf_callback(GB_gameboy_t *gb, GB_frame_perf_callback_t callback);
+
+/* Periodic PC sampler: fires the callback every `cycle_interval` 16MHz cycles
+   inside GB_advance_cycles, with the current PC and the ROM bank that PC maps
+   to. Pass cycle_interval=0 to disable. Lower intervals = more samples = more
+   detail but more overhead. 1024 is a reasonable starting point (~140 samples
+   per normal-speed frame). */
+void GB_set_pc_sample_callback(GB_gameboy_t *gb, uint32_t cycle_interval, GB_pc_sample_callback_t callback);
+
+/* Trace-tag callback: fires whenever the ROM writes a byte to the magic IO
+   address 0xFF03 (an unused IO register on real hardware, so writes are no-ops
+   on actual DMG/CGB). The callback receives the byte value plus the PC and
+   bank where the write occurred. Intended for ROM-side instrumentation:
+       ld a, MY_TAG
+       ldh [$03], a
+   The ROM author defines their own tag scheme. */
+void GB_set_tag_callback(GB_gameboy_t *gb, GB_tag_callback_t callback);
 
 /* These APIs are used when using internal clock */
 void GB_set_serial_transfer_bit_start_callback(GB_gameboy_t *gb, GB_serial_transfer_bit_start_callback_t callback);

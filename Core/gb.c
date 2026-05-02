@@ -1308,6 +1308,32 @@ void GB_set_lcd_status_callback(GB_gameboy_t *gb, GB_lcd_status_callback_t callb
     gb->lcd_status_callback = callback;
 }
 
+void GB_set_frame_perf_callback(GB_gameboy_t *gb, GB_frame_perf_callback_t callback)
+{
+    if (!callback) {
+        GB_ASSERT_NOT_RUNNING_OTHER_THREAD(gb)
+    }
+    gb->frame_perf_callback = callback;
+}
+
+void GB_set_pc_sample_callback(GB_gameboy_t *gb, uint32_t cycle_interval, GB_pc_sample_callback_t callback)
+{
+    if (!callback || !cycle_interval) {
+        GB_ASSERT_NOT_RUNNING_OTHER_THREAD(gb)
+    }
+    gb->pc_sample_callback = callback;
+    gb->pc_sample_interval = cycle_interval;
+    gb->pc_sample_accumulator = 0;
+}
+
+void GB_set_tag_callback(GB_gameboy_t *gb, GB_tag_callback_t callback)
+{
+    if (!callback) {
+        GB_ASSERT_NOT_RUNNING_OTHER_THREAD(gb)
+    }
+    gb->tag_callback = callback;
+}
+
 void GB_set_infrared_callback(GB_gameboy_t *gb, GB_infrared_callback_t callback)
 {
     if (!callback) {

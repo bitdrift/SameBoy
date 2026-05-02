@@ -1016,6 +1016,9 @@ static void write_vram(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
         return;
     }
     gb->vram[(addr & 0x1FFF) + (gb->cgb_vram_bank? 0x2000 : 0)] = value;
+#ifndef GB_DISABLE_DEBUGGER
+    gb->current_frame_mem_writes++;
+#endif
 }
 
 static bool huc3_write(GB_gameboy_t *gb, uint8_t value)
@@ -1309,15 +1312,24 @@ static void write_mbc_ram(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
 static void write_ram(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
 {
     gb->ram[addr & 0x0FFF] = value;
+#ifndef GB_DISABLE_DEBUGGER
+    gb->current_frame_mem_writes++;
+#endif
 }
 
 static void write_banked_ram(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
 {
     gb->ram[(addr & 0x0FFF) + gb->cgb_ram_bank * 0x1000] = value;
+#ifndef GB_DISABLE_DEBUGGER
+    gb->current_frame_mem_writes++;
+#endif
 }
 
 static void write_oam(GB_gameboy_t *gb, uint8_t addr, uint8_t value)
 {
+#ifndef GB_DISABLE_DEBUGGER
+    gb->current_frame_mem_writes++;
+#endif
     if (addr < 0xA0) {
         gb->oam[addr] = value;
         return;
@@ -1377,6 +1389,9 @@ static void write_high_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
         }
         
         if (addr < 0xFEA0) {
+#ifndef GB_DISABLE_DEBUGGER
+            gb->current_frame_mem_writes++;
+#endif
             if (gb->accessed_oam_row == 0xA0) {
                 for (unsigned i = 0; i < 8; i++) {
                     if ((i & 6)  != (addr & 6)) {
@@ -1387,7 +1402,7 @@ static void write_high_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
                     }
                 }
             }
-            
+
             gb->oam[addr & 0xFF] = value;
             
             if (gb->accessed_oam_row == 0) {
@@ -1412,10 +1427,21 @@ static void write_high_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
        (APU read and writes are already at apu.c) */
     if (addr < 0xFF80) {
         sync_ppu_if_needed(gb, addr);
-        
+
+        /* Tag-tracing magic port: $FF03 is unused on real hardware. */
+        if ((addr & 0xFF) == 0x03 && gb->tag_callback) {
+            uint16_t pc = gb->pc;
+            uint16_t bank;
+            if (pc < 0x4000) bank = gb->mbc_rom0_bank;
+            else if (pc < 0x8000) bank = gb->mbc_rom_bank;
+            else bank = 0;
+            gb->tag_callback(gb, value, pc, bank);
+            return;
+        }
+
         /* Hardware registers */
         switch (addr & 0xFF) {
-                
+
             case GB_IO_WX:
                 gb->io_registers[addr & 0xFF] = value;
                 GB_update_wx_glitch(gb);
@@ -1784,6 +1810,9 @@ static void write_high_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
     
     /* HRAM */
     gb->hram[addr - 0xFF80] = value;
+#ifndef GB_DISABLE_DEBUGGER
+    gb->current_frame_mem_writes++;
+#endif
 }
 
 

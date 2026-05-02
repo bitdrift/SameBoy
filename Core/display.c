@@ -179,9 +179,27 @@ void GB_display_vblank(GB_gameboy_t *gb, GB_vblank_type_t type)
 #ifndef GB_DISABLE_DEBUGGER
     gb->last_frame_idle_cycles = gb->current_frame_idle_cycles;
     gb->last_frame_busy_cycles = gb->current_frame_busy_cycles;
+    gb->last_frame_mem_writes = gb->current_frame_mem_writes;
+    gb->last_frame_unique_pcs = gb->current_frame_unique_pcs;
     gb->current_frame_idle_cycles = 0;
     gb->current_frame_busy_cycles = 0;
-    
+    gb->current_frame_mem_writes = 0;
+    gb->current_frame_unique_pcs = 0;
+    gb->mem_writes_snapshot = 0;
+    gb->cycles_since_last_write = 0;
+    memset(gb->pc_visited_bitmap, 0, sizeof(gb->pc_visited_bitmap));
+
+    if (gb->frame_perf_callback) {
+        GB_frame_perf_t perf = {
+            .vblank_type = type,
+            .busy_cycles = gb->last_frame_busy_cycles,
+            .idle_cycles = gb->last_frame_idle_cycles,
+            .mem_writes  = gb->last_frame_mem_writes,
+            .unique_pcs  = gb->last_frame_unique_pcs,
+        };
+        gb->frame_perf_callback(gb, &perf);
+    }
+
     if (gb->usage_frame_count++ == 60) {
         gb->last_second_idle_cycles = gb->current_second_idle_cycles;
         gb->last_second_busy_cycles = gb->current_second_busy_cycles;

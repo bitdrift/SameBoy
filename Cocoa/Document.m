@@ -123,9 +123,18 @@
     __weak NSThread *_emulationThread;
     
     GBCheatSearchController *_cheatSearchController;
-    
+
     bool _romModified;
+
+    uint64_t _perfLogFrameIndex;
+    NSString *_perfLogPendingMarker;
 }
+
+extern FILE *gb_perf_log_file;
+extern FILE *gb_pc_log_file;
+extern FILE *gb_tag_log_file;
+extern uint32_t gb_pc_sample_cycles;
+extern uint64_t gb_monotonic_ms(void);
 
 static void boot_rom_load(GB_gameboy_t *gb, GB_boot_rom_t type)
 {
@@ -137,6 +146,39 @@ static void vblank(GB_gameboy_t *gb, GB_vblank_type_t type)
 {
     Document *self = (__bridge Document *)GB_get_user_data(gb);
     [self vblankWithType:type];
+}
+
+static void framePerf(GB_gameboy_t *gb, const GB_frame_perf_t *perf)
+{
+    if (!gb_perf_log_file) return;
+    if (perf->vblank_type != GB_VBLANK_TYPE_NORMAL_FRAME) return;
+    Document *self = (__bridge Document *)GB_get_user_data(gb);
+    if (self->_perfLogPendingMarker) {
+        fprintf(gb_perf_log_file, "# session start: %s\n",
+                self->_perfLogPendingMarker.UTF8String);
+        self->_perfLogPendingMarker = nil;
+    }
+    uint32_t total = perf->busy_cycles + perf->idle_cycles;
+    double pct = total ? (100.0 * perf->busy_cycles / total) : 0.0;
+    fprintf(gb_perf_log_file, "%llu,%llu,%u,%u,%.2f,%u,%u\n",
+            (unsigned long long)self->_perfLogFrameIndex++,
+            (unsigned long long)gb_monotonic_ms(),
+            perf->busy_cycles, perf->idle_cycles, pct,
+            perf->mem_writes, perf->unique_pcs);
+}
+
+static void pcSample(GB_gameboy_t *gb, uint16_t pc, uint16_t bank)
+{
+    if (!gb_pc_log_file) return;
+    fprintf(gb_pc_log_file, "%llu,%02X,%04X\n",
+            (unsigned long long)gb_monotonic_ms(), bank, pc);
+}
+
+static void tagWrite(GB_gameboy_t *gb, uint8_t value, uint16_t pc, uint16_t bank)
+{
+    if (!gb_tag_log_file) return;
+    fprintf(gb_tag_log_file, "%llu,%02X,%04X,%02X\n",
+            (unsigned long long)gb_monotonic_ms(), bank, pc, value);
 }
 
 static void consoleLog(GB_gameboy_t *gb, const char *string, GB_log_attributes_t attributes)
@@ -297,6 +339,15 @@ static void debuggerReloadCallback(GB_gameboy_t *gb)
     GB_set_log_callback(&_gb, (GB_log_callback_t) consoleLog);
     GB_set_input_callback(&_gb, (GB_input_callback_t) consoleInput);
     GB_set_async_input_callback(&_gb, (GB_input_callback_t) asyncConsoleInput);
+    if (gb_perf_log_file) {
+        GB_set_frame_perf_callback(&_gb, framePerf);
+    }
+    if (gb_pc_log_file) {
+        GB_set_pc_sample_callback(&_gb, gb_pc_sample_cycles, pcSample);
+    }
+    if (gb_tag_log_file) {
+        GB_set_tag_callback(&_gb, tagWrite);
+    }
     [self updatePalette];
     GB_set_rgb_encode_callback(&_gb, rgbEncode);
     GB_set_camera_get_pixel_callback(&_gb, cameraGetPixel);
@@ -1351,6 +1402,10 @@ static bool is_path_writeable(const char *path)
     _fileModificationTime = [[NSFileManager defaultManager] attributesOfItemAtPath:fileName error:nil][NSFileModificationDate];
     if (_usesAutoModel) {
         _currentModel = [self bestModelForROM];
+    }
+    if (gb_perf_log_file && !ret) {
+        _perfLogFrameIndex = 0;
+        _perfLogPendingMarker = [fileName lastPathComponent] ?: @"(unknown)";
     }
     return ret;
 }
