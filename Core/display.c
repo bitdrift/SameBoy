@@ -177,6 +177,19 @@ void GB_display_vblank(GB_gameboy_t *gb, GB_vblank_type_t type)
     gb->lcd_disabled_outside_of_vblank = false;
     
 #ifndef GB_DISABLE_DEBUGGER
+    switch (type) {
+        case GB_VBLANK_TYPE_NORMAL_FRAME:
+            gb->pc_sample_artificial_frame = false;
+            gb->pc_sample_frame_counter++;
+            break;
+        case GB_VBLANK_TYPE_LCD_OFF:
+        case GB_VBLANK_TYPE_ARTIFICIAL:
+            gb->pc_sample_artificial_frame = true;
+            break;
+        default:
+            break;
+    }
+
     gb->last_frame_idle_cycles = gb->current_frame_idle_cycles;
     gb->last_frame_busy_cycles = gb->current_frame_busy_cycles;
     gb->last_frame_mem_writes = gb->current_frame_mem_writes;

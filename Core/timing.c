@@ -507,6 +507,9 @@ void GB_advance_cycles(GB_gameboy_t *gb, uint8_t cycles)
         gb->pc_sample_accumulator += cycles;
         while (gb->pc_sample_accumulator >= gb->pc_sample_interval) {
             gb->pc_sample_accumulator -= gb->pc_sample_interval;
+            if (gb->pc_sample_only_active && gb->pc_sample_region == 0) {
+                continue;
+            }
             uint16_t pc = gb->pc;
             uint16_t bank;
             if (pc < 0x4000) {
@@ -518,7 +521,11 @@ void GB_advance_cycles(GB_gameboy_t *gb, uint8_t cycles)
             else {
                 bank = 0;
             }
-            gb->pc_sample_callback(gb, pc, bank);
+            int32_t frame = (int32_t) gb->pc_sample_frame_counter;
+            if (gb->pc_sample_artificial_frame && !(gb->io_registers[GB_IO_LCDC] & GB_LCDC_ENABLE)) {
+                frame = -1;
+            }
+            gb->pc_sample_callback(gb, frame, pc, bank, gb->pc_sample_region);
         }
     }
 #endif

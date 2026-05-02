@@ -16,6 +16,10 @@
 #import "GBPaletteView.h"
 #import "GBHexStatusBarRepresenter.h"
 #import "NSObject+DefaultsObserver.h"
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define likely(x)   GB_likely(x)
 #define unlikely(x) GB_unlikely(x)
@@ -128,13 +132,157 @@
 
     uint64_t _perfLogFrameIndex;
     NSString *_perfLogPendingMarker;
+    bool _pcLogPendingSymbolsMarker;
+    struct GB_pc_log_symbol_s *_pcLogSymbols;
+    size_t _pcLogSymbolsCount;
 }
 
 extern FILE *gb_perf_log_file;
 extern FILE *gb_pc_log_file;
 extern FILE *gb_tag_log_file;
 extern uint32_t gb_pc_sample_cycles;
+extern const char *gb_pc_symbols_path;
+extern uint32_t gb_pc_symbol_max_size;
+extern bool gb_pc_log_only_active;
 extern uint64_t gb_monotonic_ms(void);
+
+typedef struct GB_pc_log_symbol_s {
+    uint16_t bank;
+    uint16_t addr;
+    uint32_t end_exclusive;
+    char *name;
+} GB_pc_log_symbol_t;
+
+static int comparePCLogSymbols(const void *a, const void *b)
+{
+    const GB_pc_log_symbol_t *left = a;
+    const GB_pc_log_symbol_t *right = b;
+    if (left->bank != right->bank) return (int)left->bank - (int)right->bank;
+    return (int)left->addr - (int)right->addr;
+}
+
+static void clearPCLogSymbols(Document *self)
+{
+    if (!self->_pcLogSymbols) return;
+    for (size_t i = 0; i < self->_pcLogSymbolsCount; i++) {
+        free(self->_pcLogSymbols[i].name);
+    }
+    free(self->_pcLogSymbols);
+    self->_pcLogSymbols = NULL;
+    self->_pcLogSymbolsCount = 0;
+}
+
+static bool parsePCLogSymbolLine(const char *line, uint16_t *bank, uint16_t *addr, char *name, size_t name_size)
+{
+    unsigned parsed_bank = 0;
+    unsigned parsed_addr = 0;
+    if (sscanf(line, " %x:%x %511s", &parsed_bank, &parsed_addr, name) != 3 &&
+        sscanf(line, " %x:%x=%511s", &parsed_bank, &parsed_addr, name) != 3) {
+        return false;
+    }
+    if (parsed_bank > 0xFFFF || parsed_addr > 0xFFFF || name[0] == 0) return false;
+    name[name_size - 1] = 0;
+    *bank = (uint16_t)parsed_bank;
+    *addr = (uint16_t)parsed_addr;
+    return true;
+}
+
+static void loadPCLogSymbols(Document *self, const char *path)
+{
+    clearPCLogSymbols(self);
+    if (!path || !path[0]) return;
+
+    FILE *symbols = fopen(path, "r");
+    if (!symbols) {
+        fprintf(stderr, "sameboy: cannot open symbols '%s': %s\n", path, strerror(errno));
+        return;
+    }
+
+    size_t capacity = 0;
+    char *line = NULL;
+    size_t line_capacity = 0;
+    while (getline(&line, &line_capacity, symbols) != -1) {
+        const char *cursor = line;
+        while (*cursor == ' ' || *cursor == '\t') cursor++;
+        if (*cursor == 0 || *cursor == '\n' || *cursor == '\r' || *cursor == ';' || *cursor == '#') continue;
+
+        uint16_t bank = 0;
+        uint16_t addr = 0;
+        char name[512] = {0};
+        if (!parsePCLogSymbolLine(cursor, &bank, &addr, name, sizeof(name))) {
+            continue;
+        }
+
+        if (self->_pcLogSymbolsCount == capacity) {
+            capacity = capacity ? capacity * 2 : 1024;
+            GB_pc_log_symbol_t *resized = realloc(self->_pcLogSymbols, sizeof(*self->_pcLogSymbols) * capacity);
+            if (!resized) {
+                fprintf(stderr, "sameboy: out of memory while loading symbols\n");
+                clearPCLogSymbols(self);
+                break;
+            }
+            self->_pcLogSymbols = resized;
+        }
+        self->_pcLogSymbols[self->_pcLogSymbolsCount].bank = bank;
+        self->_pcLogSymbols[self->_pcLogSymbolsCount].addr = addr;
+        self->_pcLogSymbols[self->_pcLogSymbolsCount].end_exclusive = 0x10000;
+        self->_pcLogSymbols[self->_pcLogSymbolsCount].name = strdup(name);
+        if (!self->_pcLogSymbols[self->_pcLogSymbolsCount].name) {
+            fprintf(stderr, "sameboy: out of memory while loading symbols\n");
+            clearPCLogSymbols(self);
+            break;
+        }
+        self->_pcLogSymbolsCount++;
+    }
+
+    free(line);
+    fclose(symbols);
+    if (self->_pcLogSymbolsCount) {
+        qsort(self->_pcLogSymbols, self->_pcLogSymbolsCount, sizeof(*self->_pcLogSymbols), comparePCLogSymbols);
+        for (size_t i = 0; i < self->_pcLogSymbolsCount; i++) {
+            uint32_t end_exclusive = 0x10000;
+            if (i + 1 < self->_pcLogSymbolsCount &&
+                self->_pcLogSymbols[i + 1].bank == self->_pcLogSymbols[i].bank) {
+                end_exclusive = self->_pcLogSymbols[i + 1].addr;
+            }
+            if (gb_pc_symbol_max_size) {
+                uint32_t capped = (uint32_t)self->_pcLogSymbols[i].addr + gb_pc_symbol_max_size;
+                if (capped > 0x10000) capped = 0x10000;
+                if (capped < end_exclusive) end_exclusive = capped;
+            }
+            self->_pcLogSymbols[i].end_exclusive = end_exclusive;
+        }
+    }
+}
+
+static const char *lookupPCLogSymbol(Document *self, uint16_t bank, uint16_t pc)
+{
+    if (!self->_pcLogSymbolsCount) return NULL;
+
+    size_t left = 0;
+    size_t right = self->_pcLogSymbolsCount;
+    while (left < right) {
+        size_t mid = left + (right - left) / 2;
+        if (self->_pcLogSymbols[mid].bank < bank) left = mid + 1;
+        else right = mid;
+    }
+    size_t bank_start = left;
+    while (left < self->_pcLogSymbolsCount && self->_pcLogSymbols[left].bank == bank) left++;
+    size_t bank_end = left;
+    if (bank_start == bank_end) return NULL;
+
+    size_t lo = bank_start;
+    size_t hi = bank_end;
+    while (lo < hi) {
+        size_t mid = lo + (hi - lo) / 2;
+        if (self->_pcLogSymbols[mid].addr <= pc) lo = mid + 1;
+        else hi = mid;
+    }
+    if (lo == bank_start) return NULL;
+    GB_pc_log_symbol_t *symbol = &self->_pcLogSymbols[lo - 1];
+    if (pc >= symbol->end_exclusive) return NULL;
+    return symbol->name;
+}
 
 static void boot_rom_load(GB_gameboy_t *gb, GB_boot_rom_t type)
 {
@@ -167,11 +315,23 @@ static void framePerf(GB_gameboy_t *gb, const GB_frame_perf_t *perf)
             perf->mem_writes, perf->unique_pcs);
 }
 
-static void pcSample(GB_gameboy_t *gb, uint16_t pc, uint16_t bank)
+static void pcSample(GB_gameboy_t *gb, int32_t frame, uint16_t pc, uint16_t bank, uint8_t region)
 {
     if (!gb_pc_log_file) return;
-    fprintf(gb_pc_log_file, "%llu,%02X,%04X\n",
-            (unsigned long long)gb_monotonic_ms(), bank, pc);
+    Document *self = (__bridge Document *)GB_get_user_data(gb);
+    if (self->_pcLogPendingSymbolsMarker) {
+        fprintf(gb_pc_log_file, "# symbols: %s\n", gb_pc_symbols_path);
+        self->_pcLogPendingSymbolsMarker = false;
+    }
+    const char *function = gb_pc_symbols_path ? lookupPCLogSymbol(self, bank, pc) : NULL;
+    if (gb_pc_symbols_path) {
+        fprintf(gb_pc_log_file, "%d,%llu,%02X,%04X,%s,%02X\n",
+                frame, (unsigned long long)gb_monotonic_ms(), bank, pc, function ? function : "", region);
+    }
+    else {
+        fprintf(gb_pc_log_file, "%d,%llu,%02X,%04X,%02X\n",
+                frame, (unsigned long long)gb_monotonic_ms(), bank, pc, region);
+    }
 }
 
 static void tagWrite(GB_gameboy_t *gb, uint8_t value, uint16_t pc, uint16_t bank)
@@ -344,6 +504,7 @@ static void debuggerReloadCallback(GB_gameboy_t *gb)
     }
     if (gb_pc_log_file) {
         GB_set_pc_sample_callback(&_gb, gb_pc_sample_cycles, pcSample);
+        GB_set_pc_sample_only_active(&_gb, gb_pc_log_only_active);
     }
     if (gb_tag_log_file) {
         GB_set_tag_callback(&_gb, tagWrite);
@@ -857,6 +1018,7 @@ static unsigned *multiplication_table_for_frequency(unsigned frequency)
 {
     [_cameraSession stopRunning];
     self.view.gb = NULL;
+    clearPCLogSymbols(self);
     GB_free(&_gb);
     if (_cameraImage) {
         CVBufferRelease(_cameraImage);
@@ -1406,6 +1568,10 @@ static bool is_path_writeable(const char *path)
     if (gb_perf_log_file && !ret) {
         _perfLogFrameIndex = 0;
         _perfLogPendingMarker = [fileName lastPathComponent] ?: @"(unknown)";
+    }
+    if (gb_pc_log_file && !ret) {
+        loadPCLogSymbols(self, gb_pc_symbols_path);
+        _pcLogPendingSymbolsMarker = gb_pc_symbols_path && gb_pc_symbols_path[0];
     }
     return ret;
 }

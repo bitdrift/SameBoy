@@ -1326,6 +1326,11 @@ void GB_set_pc_sample_callback(GB_gameboy_t *gb, uint32_t cycle_interval, GB_pc_
     gb->pc_sample_accumulator = 0;
 }
 
+void GB_set_pc_sample_only_active(GB_gameboy_t *gb, bool only_active)
+{
+    gb->pc_sample_only_active = only_active;
+}
+
 void GB_set_tag_callback(GB_gameboy_t *gb, GB_tag_callback_t callback)
 {
     if (!callback) {

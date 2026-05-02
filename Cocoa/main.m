@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 #include <errno.h>
 #include <mach/mach_time.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -10,6 +11,9 @@ FILE *gb_perf_log_file = NULL;
 FILE *gb_pc_log_file = NULL;
 FILE *gb_tag_log_file = NULL;
 uint32_t gb_pc_sample_cycles = 1024;
+const char *gb_pc_symbols_path = NULL;
+uint32_t gb_pc_symbol_max_size = 0;
+bool gb_pc_log_only_active = false;
 
 static uint64_t mono_start_ns = 0;
 
@@ -57,6 +61,11 @@ static void print_help(const char *argv0)
         "  --pc-log <path>           Append periodic PC samples to <path> (CSV).\n"
         "  --pc-sample-cycles <N>    PC sampling interval in 16MHz cycles\n"
         "                            (default 1024 = ~140 samples per normal frame).\n"
+        "  --symbols <path.sym>      Resolve PC samples to function names from\n"
+        "                            <path.sym> (SDCC/rgbds style).\n"
+        "  --symbol-max-size <N>     Optional cap (bytes) for inferred symbol\n"
+        "                            coverage. 0 (default) disables the cap.\n"
+        "  --pc-log-only-active      Skip PC samples while region is 0x00.\n"
         "  --tag-log <path>          Append ROM-emitted trace tags to <path> (CSV).\n"
         "                            See \"--tag-log format\" below.\n"
         "  --update-launch           Internal: used after a software update.\n"
@@ -123,15 +132,32 @@ static void print_help(const char *argv0)
         "  the data, decrease it for higher resolution.\n"
         "\n"
         "  Columns:\n"
+        "    frame         0-based frame index for the current ROM session.\n"
+        "                  Samples captured while LCD is off are emitted as -1.\n"
         "    timestamp_ms  Host monotonic milliseconds since process start.\n"
         "    bank          Hex ROM bank that pc maps to (0 for RAM/IO).\n"
         "    pc            Hex program counter (16-bit).\n"
+        "    function      Present only with --symbols. Name is emitted only when\n"
+        "                  pc is within that symbol's inferred coverage range:\n"
+        "                  from symbol addr up to (but excluding) next symbol addr\n"
+        "                  in the same bank, optionally capped by --symbol-max-size.\n"
+        "    region        Hex active region byte from writes to $FF03.\n"
+        "\n"
+        "  If --symbols is used, one comment line is emitted per ROM session:\n"
+        "    # symbols: <path>\n"
+        "  Skip lines beginning with '#'.\n"
+        "\n"
+        "  Region convention for ROM-side instrumentation:\n"
+        "    00         no region active\n"
+        "    01-7F      user-defined region IDs\n"
+        "    80-FF      reserved for future emulator use\n"
+        "  Use --pc-log-only-active to suppress rows while region=00.\n"
         "\n"
         "  Example:\n"
-        "    timestamp_ms,bank,pc\n"
-        "    1247,00,1A40\n"
-        "    1247,00,1A48\n"
-        "    1247,02,4080\n"
+        "    frame,timestamp_ms,bank,pc,region\n"
+        "    5902,100626,0B,49DA,A1\n"
+        "    5902,100627,0B,49E0,A1\n"
+        "    5903,100642,00,0150,00\n"
         "\n"
         "------------------------------------------------------------------\n"
         "--tag-log format\n"
@@ -192,6 +218,9 @@ static FILE *open_csv_log(const char *path, const char *header, void (*close_fn)
 int main(int argc, const char *argv[])
 {
     gb_monotonic_ms(); // initialize start time
+    const char *perf_log_path = NULL;
+    const char *pc_log_path = NULL;
+    const char *tag_log_path = NULL;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
@@ -199,19 +228,13 @@ int main(int argc, const char *argv[])
             return 0;
         }
         if (strcmp(argv[i], "--perf-log") == 0 && i + 1 < argc) {
-            gb_perf_log_file = open_csv_log(argv[i + 1],
-                "frame,timestamp_ms,busy_cycles,idle_cycles,cpu_pct,mem_writes,unique_pcs\n",
-                close_perf_log);
-            if (!gb_perf_log_file) return 1;
+            perf_log_path = argv[i + 1];
             extract_arg(&argc, argv, i, 2);
             i--;
             continue;
         }
         if (strcmp(argv[i], "--pc-log") == 0 && i + 1 < argc) {
-            gb_pc_log_file = open_csv_log(argv[i + 1],
-                "timestamp_ms,bank,pc\n",
-                close_pc_log);
-            if (!gb_pc_log_file) return 1;
+            pc_log_path = argv[i + 1];
             extract_arg(&argc, argv, i, 2);
             i--;
             continue;
@@ -223,15 +246,50 @@ int main(int argc, const char *argv[])
             i--;
             continue;
         }
-        if (strcmp(argv[i], "--tag-log") == 0 && i + 1 < argc) {
-            gb_tag_log_file = open_csv_log(argv[i + 1],
-                "timestamp_ms,bank,pc,tag\n",
-                close_tag_log);
-            if (!gb_tag_log_file) return 1;
+        if (strcmp(argv[i], "--symbols") == 0 && i + 1 < argc) {
+            gb_pc_symbols_path = argv[i + 1];
             extract_arg(&argc, argv, i, 2);
             i--;
             continue;
         }
+        if (strcmp(argv[i], "--symbol-max-size") == 0 && i + 1 < argc) {
+            gb_pc_symbol_max_size = (uint32_t)strtoul(argv[i + 1], NULL, 10);
+            extract_arg(&argc, argv, i, 2);
+            i--;
+            continue;
+        }
+        if (strcmp(argv[i], "--pc-log-only-active") == 0) {
+            gb_pc_log_only_active = true;
+            extract_arg(&argc, argv, i, 1);
+            i--;
+            continue;
+        }
+        if (strcmp(argv[i], "--tag-log") == 0 && i + 1 < argc) {
+            tag_log_path = argv[i + 1];
+            extract_arg(&argc, argv, i, 2);
+            i--;
+            continue;
+        }
+    }
+
+    if (perf_log_path) {
+        gb_perf_log_file = open_csv_log(perf_log_path,
+            "frame,timestamp_ms,busy_cycles,idle_cycles,cpu_pct,mem_writes,unique_pcs\n",
+            close_perf_log);
+        if (!gb_perf_log_file) return 1;
+    }
+    if (pc_log_path) {
+        const char *header = gb_pc_symbols_path ?
+            "frame,timestamp_ms,bank,pc,function,region\n" :
+            "frame,timestamp_ms,bank,pc,region\n";
+        gb_pc_log_file = open_csv_log(pc_log_path, header, close_pc_log);
+        if (!gb_pc_log_file) return 1;
+    }
+    if (tag_log_path) {
+        gb_tag_log_file = open_csv_log(tag_log_path,
+            "timestamp_ms,bank,pc,tag\n",
+            close_tag_log);
+        if (!gb_tag_log_file) return 1;
     }
     return NSApplicationMain(argc, argv);
 }

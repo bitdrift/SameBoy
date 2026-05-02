@@ -292,7 +292,7 @@ typedef struct {
     uint32_t unique_pcs;      // Distinct PCs executed this frame
 } GB_frame_perf_t;
 typedef void (*GB_frame_perf_callback_t)(GB_gameboy_t *gb, const GB_frame_perf_t *perf);
-typedef void (*GB_pc_sample_callback_t)(GB_gameboy_t *gb, uint16_t pc, uint16_t bank);
+typedef void (*GB_pc_sample_callback_t)(GB_gameboy_t *gb, int32_t frame, uint16_t pc, uint16_t bank, uint8_t region);
 typedef void (*GB_tag_callback_t)(GB_gameboy_t *gb, uint8_t value, uint16_t pc, uint16_t bank);
 
 struct GB_breakpoint_s;
@@ -750,6 +750,10 @@ struct GB_gameboy_internal_s {
         GB_pc_sample_callback_t pc_sample_callback;
         uint32_t pc_sample_interval;
         uint32_t pc_sample_accumulator;
+        uint32_t pc_sample_frame_counter;
+        bool pc_sample_artificial_frame;
+        uint8_t pc_sample_region;
+        bool pc_sample_only_active;
         GB_tag_callback_t tag_callback;
                
 #ifndef GB_DISABLE_DEBUGGER
@@ -1004,11 +1008,15 @@ void GB_set_lcd_status_callback(GB_gameboy_t *gb, GB_lcd_status_callback_t callb
 void GB_set_frame_perf_callback(GB_gameboy_t *gb, GB_frame_perf_callback_t callback);
 
 /* Periodic PC sampler: fires the callback every `cycle_interval` 16MHz cycles
-   inside GB_advance_cycles, with the current PC and the ROM bank that PC maps
-   to. Pass cycle_interval=0 to disable. Lower intervals = more samples = more
-   detail but more overhead. 1024 is a reasonable starting point (~140 samples
-   per normal-speed frame). */
+   inside GB_advance_cycles, with a frame ID, current PC, the ROM bank that PC
+   maps to, and active region byte. frame is a 0-based per-session frame index
+   matching frame perf logging and resets on GB_reset; frame is -1 for samples
+   while the LCD is off / artificial frames. region defaults to 0x00 and tracks
+   writes to 0xFF03. Pass cycle_interval=0 to disable. Lower intervals = more
+   samples = more detail but more overhead. 1024 is a reasonable starting point
+   (~140 samples per normal-speed frame). */
 void GB_set_pc_sample_callback(GB_gameboy_t *gb, uint32_t cycle_interval, GB_pc_sample_callback_t callback);
+void GB_set_pc_sample_only_active(GB_gameboy_t *gb, bool only_active);
 
 /* Trace-tag callback: fires whenever the ROM writes a byte to the magic IO
    address 0xFF03 (an unused IO register on real hardware, so writes are no-ops

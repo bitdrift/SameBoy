@@ -1429,13 +1429,16 @@ static void write_high_memory(GB_gameboy_t *gb, uint16_t addr, uint8_t value)
         sync_ppu_if_needed(gb, addr);
 
         /* Tag-tracing magic port: $FF03 is unused on real hardware. */
-        if ((addr & 0xFF) == 0x03 && gb->tag_callback) {
+        if ((addr & 0xFF) == 0x03 && (gb->tag_callback || gb->pc_sample_callback)) {
+            gb->pc_sample_region = value;
             uint16_t pc = gb->pc;
             uint16_t bank;
             if (pc < 0x4000) bank = gb->mbc_rom0_bank;
             else if (pc < 0x8000) bank = gb->mbc_rom_bank;
             else bank = 0;
-            gb->tag_callback(gb, value, pc, bank);
+            if (gb->tag_callback) {
+                gb->tag_callback(gb, value, pc, bank);
+            }
             return;
         }
 
